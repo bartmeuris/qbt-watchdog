@@ -1,0 +1,206 @@
+name: CI and container image
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  go:
+    name: Go checks and image metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
+      version: ${{ steps.meta.outputs.version }}
+      created: ${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+      publish: ${{ steps.image.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select the exact module toolchain and image destination
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          module = Path('go.mod').read_text()
+          toolchain = re.search(r'^toolchain go(\d+\.\d+\.\d+)$', module, re.MULTILINE)
+          if toolchain is None:
+              raise SystemExit('go.mod must declare an exact stable Go toolchain')
+          ref = os.environ['GITHUB_REF']
+          event = os.environ['GITHUB_EVENT_NAME']
+          default_ref = 'refs/heads/' + os.environ['DEFAULT_BRANCH']
+          release = ref.startswith('refs/tags/')
+          if release:
+              number = r'(?:0|[1-9][0-9]*)'
+              identifier = r'(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+              build = r'(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?'
+              semver = rf'v{number}\.{number}\.{number}(?:-{identifier}(?:\.{identifier})*)?{build}'
+              if re.fullmatch(semver, ref.removeprefix('refs/tags/')) is None:
+                  raise SystemExit('Release tags must be valid v-prefixed SemVer')
+          publish = (event == 'push' and (ref == default_ref or release)) or (
+              event == 'workflow_dispatch' and ref == default_ref
+          )
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print('go-version=' + toolchain[1], file=output)
+              print('name=ghcr.io/' + os.environ['REPOSITORY'].lower(), file=output)
+              print('publish=' + str(publish).lower(), file=output)
+          PY
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.image.outputs.go-version }}
+          cache: true
+      - name: Check formatting without modifying sources
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [[ -n "$unformatted" ]]; then
+            printf 'Go files need formatting:\n%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        run: make vet
+      - name: Test
+        run: make test
+      - name: Race test
+        run: make race
+      - name: Image tags and OCI metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.image.outputs.name }}
+          flavor: latest=false
+          tags: |
+            type=sha,format=long
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+            type=raw,value=latest,priority=100,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+          labels: |
+            org.opencontainers.image.title=qbt-watchdog
+            org.opencontainers.image.description=Read-only dashboard and safe metadata timeout watchdog for qBittorrent
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Build
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          REVISION: ${{ github.sha }}
+          BUILD_DATE: ${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+        run: make build
+
+  image:
+    name: Multi-platform image validation
+    needs: go
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build both platforms without publishing
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/qbt-watchdog.oci.tar
+          tags: ${{ needs.go.outputs.tags }}
+          labels: ${{ needs.go.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.go.outputs.version }}
+            REVISION=${{ github.sha }}
+            BUILD_DATE=${{ needs.go.outputs.created }}
+          cache-from: type=gha,scope=container
+          cache-to: ${{ needs.go.outputs.publish == 'true' && 'type=gha,mode=max,scope=container' || '' }}
+      - name: Load native image for smoke validation
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: qbt-watchdog:smoke
+          labels: ${{ needs.go.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.go.outputs.version }}
+            REVISION=${{ github.sha }}
+            BUILD_DATE=${{ needs.go.outputs.created }}
+      - name: Verify executable and embedded build metadata
+        env:
+          EXPECTED_VERSION: ${{ needs.go.outputs.version }}
+          EXPECTED_REVISION: ${{ github.sha }}
+          EXPECTED_DATE: ${{ needs.go.outputs.created }}
+        shell: bash
+        run: |
+          docker run --rm --network none --read-only qbt-watchdog:smoke version > "$RUNNER_TEMP/version.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          build = json.loads((Path(os.environ['RUNNER_TEMP']) / 'version.json').read_text())
+          for field, expected in [('version', 'EXPECTED_VERSION'), ('revision', 'EXPECTED_REVISION'), ('build_date', 'EXPECTED_DATE')]:
+              if build.get(field) != os.environ[expected]:
+                  raise SystemExit(f'Image {field} does not match its OCI metadata')
+          PY
+
+  publish:
+    name: Publish to GHCR
+    needs: [go, image]
+    if: >-
+      needs.go.outputs.publish == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: ghcr-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish checked image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ needs.go.outputs.tags }}
+          labels: ${{ needs.go.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.go.outputs.version }}
+            REVISION=${{ github.sha }}
+            BUILD_DATE=${{ needs.go.outputs.created }}
+          cache-from: type=gha,scope=container

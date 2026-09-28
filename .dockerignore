@@ -1,0 +1,17 @@
+.git
+qbt-watchdog
+secrets
+/config/
+/config.yaml
+/config.toml
+.env*
+**/.env*
+/dockerdata/
+/data/
+.qbt-watchdog-*
+**/.qbt-watchdog-*
+!/config.example.yaml
+*.test
+*.out
+state*.json*
+.DS_Store

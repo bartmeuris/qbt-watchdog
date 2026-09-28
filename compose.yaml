@@ -1,0 +1,22 @@
+services:
+  qbt-watchdog:
+    build: .
+    image: qbt-watchdog:local
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks:
+      - qbt
+    ports:
+      - "127.0.0.1:8090:8080"
+    command: ["--config", "/config/config.yaml"]
+    volumes:
+      - ./config:/config:ro
+      - ./secrets:/run/secrets:ro
+      - ./watchdog-data:/data
+
+networks:
+  qbt:
+    external: true
+    name: ${QBT_NETWORK:-qbt}
