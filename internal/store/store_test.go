@@ -52,6 +52,11 @@ func TestCorruptAndInvalidStatePreserved(t *testing.T) {
 		s.Tracked[hash] = episode
 		cases[name], _ = json.Marshal(s)
 	}
+	for name, prefix := range map[string]string{"short prefix": "abc", "whitespace prefix": " qbtw-", "comma prefix": "qbt,w-", "blank prefix": "    "} {
+		s := Empty()
+		s.WatchdogTagPrefix = prefix
+		cases[name], _ = json.Marshal(s)
+	}
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -110,5 +115,18 @@ func TestHistoryTruncated(t *testing.T) {
 	loaded, e := f.Load(now)
 	if e != nil || len(loaded.History) != 1 {
 		t.Fatal(loaded, e)
+	}
+}
+
+func TestStateWithoutWatchdogTagPrefixLoads(t *testing.T) {
+	now := time.Now().UTC()
+	f := File{Path: filepath.Join(t.TempDir(), "state.json"), HistoryLimit: 10}
+	data := `{"recovery_jobs":{},"seed_observed":{},"safety_key":"","endpoint_key":"","schema_version":4,"tracked":{},"counters":{},"history":[]}`
+	if err := os.WriteFile(f.Path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := f.Load(now)
+	if err != nil || loaded.WatchdogTagPrefix != "" {
+		t.Fatal(loaded, err)
 	}
 }

@@ -180,6 +180,10 @@ func (s *Service) prepareRecovery(t qbt.Torrent, episode store.Episode) {
 		if !cfg.Handles(t.Category) {
 			continue
 		}
+		mode, ok := s.c.EffectiveArrMode(episode.Policy, cfg)
+		if !ok {
+			continue
+		}
 		duplicate := false
 		for _, job := range s.state.RecoveryJobs {
 			if job.Kind == cfg.Kind && job.Endpoint == cfg.EndpointKey() && job.Hash == t.Hash && job.Policy == episode.Policy {
@@ -196,7 +200,7 @@ func (s *Service) prepareRecovery(t qbt.Torrent, episode store.Episode) {
 		}
 		identity := string(cfg.Kind) + cfg.EndpointKey() + t.Hash + string(episode.Policy) + episode.FirstSeen.UTC().Format(time.RFC3339Nano)
 		digest := sha256.Sum256([]byte(identity))
-		job := store.RecoveryJob{ID: hex.EncodeToString(digest[:]), Kind: cfg.Kind, Endpoint: cfg.EndpointKey(), Hash: t.Hash, Policy: episode.Policy, Action: s.c.EffectiveAction(episode.Policy), EpisodeAt: episode.FirstSeen, CapturedAt: now, ExpiresAt: now.Add(store.RecoveryTTL), Mode: cfg.Mode, Stage: store.Prepared}
+		job := store.RecoveryJob{ID: hex.EncodeToString(digest[:]), Kind: cfg.Kind, Endpoint: cfg.EndpointKey(), Hash: t.Hash, Policy: episode.Policy, Action: s.c.EffectiveAction(episode.Policy), EpisodeAt: episode.FirstSeen, CapturedAt: now, ExpiresAt: now.Add(store.RecoveryTTL), Mode: mode, Stage: store.Prepared}
 		if r := s.integrations[cfg.Kind]; r != nil && r.client != nil && !r.queueAt.IsZero() && now.Sub(r.queueAt) >= 0 && now.Sub(r.queueAt) <= queueFreshness {
 			mapped, ok := r.client.Map(r.queue, t.Hash)
 			if ok && !mapped.Truncated && !mapped.Incomplete {
@@ -388,6 +392,9 @@ func (s *Service) recoveryCycle(parent context.Context, kind config.ArrKind) {
 }
 
 func (s *Service) claimCurrent(ctx context.Context, r *integrationRuntime, j store.RecoveryJob) bool {
+	if _, ok := s.c.EffectiveArrMode(j.Policy, r.config); !ok {
+		return false
+	}
 	current, ok := s.state.RecoveryJobs[j.ID]
 	return ok && current.Stage == j.Stage && s.integrations[j.Kind] == r && !s.c.DryRun && r.config.Enabled &&
 		s.c.EffectiveAction(j.Policy).Destructive() && s.c.MaxDeletions > 0 &&

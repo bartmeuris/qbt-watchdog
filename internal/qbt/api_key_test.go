@@ -48,7 +48,7 @@ func TestBearerEveryEndpointWithoutSession(t *testing.T) {
 		case "/qbt/api/v2/app/webapiVersion":
 			io.WriteString(w, "2.14.1")
 		case "/qbt/api/v2/torrents/info":
-			io.WriteString(w, `[{"hash":"`+hash+`","state":"metaDL","progress":0,"downloaded":0,"num_seeds":0}]`)
+			io.WriteString(w, `[{"hash":"`+hash+`","state":"metaDL","progress":0,"downloaded":0,"size":0,"total_size":1,"completed":0,"amount_left":0,"num_seeds":0}]`)
 		case "/qbt/api/v2/torrents/delete":
 			if r.Method != http.MethodPost || !strings.Contains(string(body), "deleteFiles=false") {
 				t.Error("incorrect deletion request")

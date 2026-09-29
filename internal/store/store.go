@@ -20,6 +20,7 @@ import (
 //	2 — added the policy partition and the seeder observation flag.
 //	3 — action-accurate history vocabulary (warn, action_requested,
 //	    action_confirmed, action_skipped, action_failed).
+//	4 — recovery jobs and persisted watchdog tag prefix (additive; no later bump).
 //
 // Older layouts are migrated pessimistically; anything newer is unreadable and
 // is preserved as corrupt rather than guessed at. See migrate.
@@ -85,14 +86,15 @@ func boundedText(text string, limit int) string {
 }
 
 type State struct {
-	RecoveryJobs  map[string]RecoveryJob `json:"recovery_jobs"`
-	SeedObserved  map[string]bool        `json:"seed_observed"`
-	SafetyKey     string                 `json:"safety_key"`
-	EndpointKey   string                 `json:"endpoint_key"`
-	SchemaVersion int                    `json:"schema_version"`
-	Tracked       map[string]Episode     `json:"tracked"`
-	Counters      Counters               `json:"counters"`
-	History       []Event                `json:"history"`
+	RecoveryJobs      map[string]RecoveryJob `json:"recovery_jobs"`
+	SeedObserved      map[string]bool        `json:"seed_observed"`
+	SafetyKey         string                 `json:"safety_key"`
+	EndpointKey       string                 `json:"endpoint_key"`
+	WatchdogTagPrefix string                 `json:"watchdog_tag_prefix,omitempty"`
+	SchemaVersion     int                    `json:"schema_version"`
+	Tracked           map[string]Episode     `json:"tracked"`
+	Counters          Counters               `json:"counters"`
+	History           []Event                `json:"history"`
 }
 
 func Empty() State {
@@ -122,6 +124,9 @@ func valid(s State, now time.Time) bool {
 		}
 	}
 	if !readable(s.SchemaVersion) || s.Tracked == nil {
+		return false
+	}
+	if s.WatchdogTagPrefix != "" && !validWatchdogTagPrefix(s.WatchdogTagPrefix) {
 		return false
 	}
 	if s.SchemaVersion >= 2 && s.SeedObserved == nil {
@@ -165,6 +170,12 @@ func valid(s State, now time.Time) bool {
 	}
 	return true
 }
+
+func validWatchdogTagPrefix(prefix string) bool {
+	trimmed := strings.TrimSpace(prefix)
+	return trimmed != "" && prefix == trimmed && !strings.Contains(prefix, ",") && len(prefix) >= 4
+}
+
 func validAction(s string) bool {
 	switch s {
 	case "warn", "action_requested", "action_confirmed", "action_skipped", "action_failed", "recovery":

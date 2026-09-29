@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -54,8 +55,22 @@ func TestDefaultsAndMinimalCommandLine(t *testing.T) {
 		t.Fatal("incorrect presentation defaults")
 	}
 	for _, id := range PolicyIDs() {
-		if c.Policies[id] != (Policy{Warn, 30 * time.Minute}) {
-			t.Fatal("policy default is not warn/30m", id)
+		policy := c.Policies[id]
+		if policy.Action != Warn || policy.ArrMode != InheritArrMode {
+			t.Fatal("policy default is not warn/inherit", id)
+		}
+		want := 30 * time.Minute
+		if id == CompletedNoData {
+			want = 2 * time.Minute
+		}
+		if id == StoppedArrManaged {
+			want = 10 * time.Minute
+			if len(policy.MatchTags) == 0 {
+				t.Fatal("stopped_arr_managed default lacks match tags")
+			}
+		}
+		if policy.Threshold != want {
+			t.Fatal("wrong policy default threshold", id, policy.Threshold)
 		}
 	}
 	if c.ConfigFile != path {
@@ -131,7 +146,7 @@ func TestFormatDetectionAndEquivalence(t *testing.T) {
 	if fromYAML.PollInterval != 45*time.Second || fromYAML.Policies[Metadata].Action != Delete {
 		t.Fatal("YAML not applied")
 	}
-	if fromYAML.URL.String() != fromTOML.URL.String() || fromYAML.PollInterval != fromTOML.PollInterval || fromYAML.Policies[Metadata] != fromTOML.Policies[Metadata] {
+	if fromYAML.URL.String() != fromTOML.URL.String() || fromYAML.PollInterval != fromTOML.PollInterval || !reflect.DeepEqual(fromYAML.Policies[Metadata], fromTOML.Policies[Metadata]) {
 		t.Fatal("YAML and TOML disagree")
 	}
 	if _, err := Load(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
@@ -174,6 +189,21 @@ func TestStrictValidationRejectsEveryInvalidSetting(t *testing.T) {
 		"policies:\n  metadata:\n    threshold: ''",
 		"policies:\n  metadata:\n    threshold: '0s'",
 		"policies:\n  metadata:\n    threshold: 30",
+		"policies:\n  metadata:\n    arr_mode: 'invalid'",
+		"policies:\n  metadata:\n    match_tags:",
+		"policies:\n  metadata:\n    match_tags: ~",
+		"policies:\n  metadata:\n    match_tags: ['Sonarr']",
+		"policies:\n  metadata:\n    match_tags: []",
+		"policies:\n  metadata:\n    match_tags: ['  ']",
+		"Policies:\n  metadata:\n    Match_Tags:",
+		"policies:\n  stopped_arr_managed:\n    match_tags:",
+		"policies:\n  stopped_arr_managed:\n    match_tags: ~",
+		"policies:\n  stopped_arr_managed:\n    match_tags: []",
+		"tag_sync:\n  prefix: ''",
+		"tag_sync:\n  prefix: ' qbtw-'",
+		"tag_sync:\n  prefix: 'qbtw,x'",
+		"exclude_tags: ['qbtw-keep']",
+		"policies:\n  stopped_arr_managed:\n    match_tags: ['qbtw-arr']",
 		"policies:\n  metadata:\n    unknown: 'SECRET'",
 		"policies: 'metadata'",
 	} {
@@ -212,6 +242,14 @@ func TestValidEdgeCases(t *testing.T) {
 	if c := decode(t, "qbt_url: 'https://host/prefix'"); c.URL.String() != "https://host/prefix/" {
 		t.Fatal("base URL not normalised", c.URL)
 	}
+	near := decode(t, minimal+"exclude_tags: ['QBTW-keep']")
+	if near.ExcludeTags[0] != "QBTW-keep" || len(near.Warnings()) == 0 {
+		t.Fatal("case-insensitive reserved-prefix near miss should load with warning")
+	}
+	casedPolicy := decode(t, minimal+"Policies:\n  Stopped_Arr_Managed:\n    match_tags: ['Lidarr']")
+	if got := casedPolicy.Policies[StoppedArrManaged].MatchTags; len(got) != 1 || got[0] != "Lidarr" {
+		t.Fatal("case-insensitive policy scan changed match tags", got)
+	}
 }
 
 func TestSecretsAreReadFromFilesAndNeverEchoed(t *testing.T) {
@@ -246,10 +284,13 @@ func TestCloneIsolatesEveryReference(t *testing.T) {
 	c.TLSCAPEM = []byte("pem")
 	clone := c.Clone()
 	clone.URL.Host = "other"
-	clone.Policies[Metadata] = Policy{DeleteFile, time.Second}
+	clone.Policies[Metadata] = Policy{Action: DeleteFile, Threshold: time.Second, ArrMode: InheritArrMode}
 	clone.IncludeCategories[0] = "mutated"
 	clone.ExcludeCategories[0] = "mutated"
 	clone.ExcludeTags[0] = "mutated"
+	stopped := clone.Policies[StoppedArrManaged]
+	stopped.MatchTags[0] = "mutated"
+	clone.Policies[StoppedArrManaged] = stopped
 	clone.TLSCAPEM[0] = 'X'
 	if c.URL.Host != "host" || c.Policies[Metadata].Action != Warn {
 		t.Fatal("clone shares the URL or policy map")
@@ -257,10 +298,13 @@ func TestCloneIsolatesEveryReference(t *testing.T) {
 	if c.IncludeCategories[0] != "a" || c.ExcludeCategories[0] != "b" || c.ExcludeTags[0] != "c" || c.TLSCAPEM[0] != 'p' {
 		t.Fatal("clone shares a slice")
 	}
+	if c.Policies[StoppedArrManaged].MatchTags[0] == "mutated" {
+		t.Fatal("clone shares policy match tags")
+	}
 }
 
 func TestDryRunOverridesEveryAction(t *testing.T) {
-	body := minimal + "policies:\n  metadata:\n    action: 'delete'\n  stalled_no_seeders:\n    action: 'delete_file'\n  stalled_seeders_seen:\n    action: 'delete'\n  stalled_partial:\n    action: 'delete_file'\n"
+	body := minimal + "policies:\n  metadata:\n    action: 'delete'\n  stalled_no_seeders:\n    action: 'delete_file'\n  stalled_seeders_seen:\n    action: 'delete'\n  stalled_partial:\n    action: 'delete_file'\n  completed_no_data:\n    action: 'delete'\n  stopped_arr_managed:\n    action: 'delete'\n    match_tags: ['Sonarr']\n"
 	c := decode(t, body)
 	for _, id := range PolicyIDs() {
 		if !c.Policies[id].Action.Destructive() {
@@ -275,6 +319,50 @@ func TestDryRunOverridesEveryAction(t *testing.T) {
 		if live.EffectiveAction(id) != live.Policies[id].Action {
 			t.Fatal("configured action not effective once dry_run is off", id)
 		}
+	}
+}
+
+func TestEffectiveArrMode(t *testing.T) {
+	for _, serviceDefault := range []ArrMode{BlocklistAndSearch, SearchOnly} {
+		for _, tc := range []struct {
+			policyMode ArrMode
+			want       ArrMode
+			ok         bool
+		}{
+			{InheritArrMode, serviceDefault, true},
+			{BlocklistAndSearch, BlocklistAndSearch, true},
+			{SearchOnly, SearchOnly, true},
+			{NoArrMode, "", false},
+		} {
+			c := decode(t, minimal)
+			p := c.Policies[Metadata]
+			p.ArrMode = tc.policyMode
+			c.Policies[Metadata] = p
+			got, ok := c.EffectiveArrMode(Metadata, ArrService{Mode: serviceDefault})
+			if got != tc.want || ok != tc.ok {
+				t.Fatal("wrong effective Arr mode", serviceDefault, tc.policyMode, got, ok)
+			}
+		}
+	}
+}
+
+func TestPolicyArrModeDoesNotChangeSafetyKey(t *testing.T) {
+	base := decode(t, minimal+"policies:\n  metadata:\n    arr_mode: inherit\n")
+	changed := decode(t, minimal+"policies:\n  metadata:\n    arr_mode: none\n")
+	if base.SafetyKey() != changed.SafetyKey() {
+		t.Fatal("policy arr_mode reset cleanup timers")
+	}
+}
+
+func TestSafetyKeyIncludesMatchTagsButNotTagPrefix(t *testing.T) {
+	base := decode(t, minimal+"policies:\n  stopped_arr_managed:\n    match_tags: ['Sonarr']\n")
+	changedTags := decode(t, minimal+"policies:\n  stopped_arr_managed:\n    match_tags: ['Radarr']\n")
+	changedPrefix := decode(t, minimal+"tag_sync:\n  prefix: 'other-'\npolicies:\n  stopped_arr_managed:\n    match_tags: ['Sonarr']\n")
+	if base.SafetyKey() == changedTags.SafetyKey() {
+		t.Fatal("match_tags did not affect safety key")
+	}
+	if base.SafetyKey() != changedPrefix.SafetyKey() {
+		t.Fatal("tag_sync prefix affected safety key")
 	}
 }
 
@@ -335,7 +423,7 @@ func TestRestartRequiredSettings(t *testing.T) {
 	live := current.Clone()
 	live.LogLevel, live.LogFormat, live.Password, live.TLSInsecure = "debug", "text", "new", true
 	live.PollInterval, live.UIRefreshInterval, live.ReadinessMaxAge = time.Minute, time.Minute, time.Minute
-	live.Policies[Metadata] = Policy{Delete, time.Hour}
+	live.Policies[Metadata] = Policy{Action: Delete, Threshold: time.Hour, ArrMode: InheritArrMode}
 	live.ExcludeTags = append(live.ExcludeTags, "extra")
 	if err := RestartRequiredError(current, live); err != nil {
 		t.Fatal("live-applicable change rejected", err)
@@ -356,7 +444,7 @@ func TestExampleConfigurationIsSafeAndComplete(t *testing.T) {
 		t.Fatal("example disables dry_run")
 	}
 	for _, id := range PolicyIDs() {
-		if c.Policies[id] != (Policy{Warn, 30 * time.Minute}) || c.EffectiveAction(id) != Warn {
+		if c.Policies[id].Action != Warn || c.EffectiveAction(id) != Warn {
 			t.Fatal("example configures an unsafe policy", id)
 		}
 	}
@@ -374,7 +462,7 @@ func TestExampleConfigurationIsSafeAndComplete(t *testing.T) {
 		"include_categories", "exclude_categories", "exclude_tags", "state_file", "history_limit",
 		"listen", "ui_refresh_interval", "readiness_max_age", "web_username", "web_password",
 		"web_password_file", "metrics_public", "tls_ca_file", "tls_insecure_skip_verify",
-		"log_level", "log_format", "dry_run", "policies",
+		"log_level", "log_format", "dry_run", "policies", "tag_sync",
 	} {
 		if !bytes.Contains(body, []byte("\n"+key+":")) {
 			t.Fatal("example omits a setting", key)

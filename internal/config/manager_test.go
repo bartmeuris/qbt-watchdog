@@ -82,7 +82,7 @@ func TestManagerSnapshotsAreIsolatedAndConcurrent(t *testing.T) {
 			for range 200 {
 				c := m.Current()
 				c.URL.Host = "MUTATED"
-				c.Policies[Metadata] = Policy{DeleteFile, time.Second}
+				c.Policies[Metadata] = Policy{Action: DeleteFile, Threshold: time.Second, ArrMode: InheritArrMode}
 				c.ExcludeTags = append(c.ExcludeTags, "mutated")
 				_ = m.Status()
 			}
@@ -185,6 +185,61 @@ func TestManagerRunAppliesLiveChangesAndSurvivesBadFiles(t *testing.T) {
 	}
 }
 
+func TestManagerRunIdenticalRecoveryClearsErrorWithoutCommit(t *testing.T) {
+	m, path := manager(t, minimal)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	outcomes := make(chan error, 16)
+	commits := 0
+	done := make(chan error, 1)
+	go func() {
+		done <- m.Run(ctx, func(Config) error { commits++; return nil }, func(err error) { outcomes <- err })
+	}()
+	await := func(wantFailure bool) error {
+		t.Helper()
+		select {
+		case err := <-outcomes:
+			if (err != nil) != wantFailure {
+				t.Fatal("unexpected reload outcome", err)
+			}
+			return err
+		case <-time.After(5 * time.Second):
+			t.Fatal("reload timed out")
+			return nil
+		}
+	}
+	replace := func(body string) {
+		t.Helper()
+		tmp := path + ".new"
+		if err := os.WriteFile(tmp, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	await(false)
+	replace(minimal + "poll_interval: 'SECRET'\n")
+	await(true)
+	replace(minimal)
+	await(false)
+	if commits != 0 {
+		t.Fatal("identical recovery reached commit", commits)
+	}
+	if status := m.Status(); status.Generation != 1 || !status.Healthy() || status.LastReloadAt.IsZero() {
+		t.Fatal("identical recovery did not clear reload error", status)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher leaked")
+	}
+}
+
 func TestWatchDebouncesBurstsOfWrites(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(minimal), 0600); err != nil {
@@ -201,6 +256,11 @@ func TestWatchDebouncesBurstsOfWrites(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("initial load timed out")
 	}
+	select {
+	case c := <-applied:
+		t.Fatal("idle watcher reloaded without a file event", c.PollInterval)
+	case <-time.After(debounceInterval * 3):
+	}
 	for i := range 20 {
 		body := minimal + "poll_interval: '" + string(rune('1'+i%9)) + "s'\n"
 		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
@@ -213,8 +273,7 @@ func TestWatchDebouncesBurstsOfWrites(t *testing.T) {
 		t.Fatal("burst never applied")
 	}
 	// The burst finished long before the debounce window elapsed, so it must
-	// have collapsed into a single reload; the periodic reconciliation is far
-	// enough away not to add another one.
+	// have collapsed into a single reload, and idle time must stay quiet.
 	select {
 	case c := <-applied:
 		t.Fatal("burst was not debounced", c.PollInterval)

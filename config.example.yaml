@@ -16,8 +16,8 @@
 #
 # Each `${NAME}` is resolved from the process environment first, then from an
 # optional `.env` file sitting next to the resolved config file (not
-# necessarily the working directory); see .env.example. The `.env` is re-read on
-# every reload, including atomic replacements, so a rotated secret needs no
+# necessarily the working directory); see .env.example. The `.env` is watched and
+# re-read when it changes, including atomic replacements, so a rotated secret needs no
 # restart — but a variable inherited from the process environment shadows `.env`
 # until the watchdog is restarted, because a running process cannot change its
 # own environment.
@@ -43,10 +43,10 @@
 # ---------------------------------------------------------------------------
 # Reloading
 # ---------------------------------------------------------------------------
-# The file is re-read automatically whenever it changes; there is no need to
-# restart or send a signal. Atomic replacements (write-to-temp then rename)
-# and Kubernetes ConfigMap/Secret symlink swaps are detected, and rapid bursts
-# of writes are debounced into a single reload.
+# The file is re-read automatically whenever it or a referenced dependency
+# changes; there is no need to restart or send a signal. Atomic replacements
+# (write-to-temp then rename) and Kubernetes ConfigMap/Secret symlink swaps are
+# detected, and rapid bursts of writes are debounced into a single reload.
 #
 # If a reload is invalid, the previously running configuration is kept in full,
 # the problem is logged, and the error is surfaced in the status payload and on
@@ -60,10 +60,11 @@
 #
 # APPLIED LIVE — everything else, including the qBittorrent endpoint,
 # credentials (including API key), TLS settings (the HTTP client is rebuilt),
-# all four policies, every interval, the category/tag exclusions, log_level,
-# log_format, the readiness and UI settings, and Sonarr/Radarr integrations.
+# all six policies, every interval, the category/tag exclusions, tag_sync,
+# log_level, log_format, the readiness and UI settings, and Sonarr/Radarr integrations.
 # Password files, API key files, integration key files, .env, and the CA bundle
-# are re-read on every reload, so rotating a mounted secret needs no restart.
+# are watched and re-read when they change, so rotating a mounted secret needs
+# no restart.
 #
 # Note that changing anything that affects qBittorrent cleanup safety — a
 # policy, dry_run, an interval, the exclusions, the action cap, qBittorrent
@@ -112,7 +113,7 @@ qbt_url: "http://qbittorrent:8080"
 # qbt_username, qbt_password and qbt_password_file.
 qbt_api_key: ""
 
-# File containing the API key. Trailing newline is stripped. Re-read on reload.
+# File containing the API key. Trailing newline is stripped. Re-read on change.
 qbt_api_key_file: ""
 
 # Web UI username for SID cookie auth. Requires a password.
@@ -120,7 +121,7 @@ qbt_username: ""
 
 # Supply the password either inline or from a file, never both. The file's
 # trailing newline is stripped. Prefer the file: it keeps the secret out of the
-# configuration and it is re-read on every reload. Secrets are never logged and
+# configuration and it is re-read when the file changes. Secrets are never logged and
 # never appear in the status payload, the metrics, the UI or any error message.
 qbt_password: ""
 qbt_password_file: ""
@@ -130,7 +131,8 @@ qbt_password_file: ""
 # ---------------------------------------------------------------------------
 
 # While true, every policy behaves as if its action were "warn": nothing is
-# ever deleted. Turning this off is logged loudly at startup and on reload.
+# ever deleted, and tag_sync writes/sweeps are suppressed. Turning this off is
+# logged loudly at startup and on reload.
 dry_run: true
 
 # Upper bound on actions (including warnings) per poll. When dry_run is true,
@@ -138,11 +140,25 @@ dry_run: true
 # action at all, however the policies are configured.
 max_actions_per_poll: 10
 
+# Optional qBittorrent tag write-back in a reserved namespace. Exact-prefix
+# exclude_tags and policy match_tags are rejected; case-insensitive near-misses
+# only warn. dry_run suppresses all tag writes and cleanup sweeps. Existing tags
+# are changed only when an add/remove delta exists.
+tag_sync:
+  enabled: false
+  prefix: "qbtw-"
+  max_writes_per_poll: 20
+# To change a claimed prefix, keep tag_sync disabled with the new prefix and
+# dry_run: false until old tags are swept (sweeps are suppressed in dry-run),
+# then re-enable. Renaming/removing state loses tracking
+# history, counters, retry budgets, and recovery jobs.
+
 # ---------------------------------------------------------------------------
 # Policies
 # ---------------------------------------------------------------------------
-# The four policies are mutually exclusive and share the same shape: an action
-# and a threshold. A torrent must match the same policy continuously for the
+# The six policies are mutually exclusive and share the same shape: an action,
+# a threshold and optional per-policy Arr recovery mode. stopped_arr_managed
+# also requires match_tags. A torrent must match the same policy continuously for the
 # whole threshold before the action is taken; any change of state, progress or
 # seeder observation starts the clock again.
 #
@@ -152,6 +168,12 @@ max_actions_per_poll: 10
 #     delete_file  remove the torrent and its downloaded files — irreversible
 #
 #   threshold: a positive Go duration such as "45m", "2h", "90s".
+#
+#   arr_mode:
+#     inherit               use the matching integration's mode (default)
+#     none                  do no Sonarr/Radarr recovery for this policy
+#     blocklist_and_search  override the integration mode for this policy
+#     search_only           override the integration mode for this policy
 #
 # dry_run overrides every action to "warn", so a destructive action needs both
 # the action here and dry_run: false.
@@ -180,6 +202,23 @@ policies:
     action: "warn"
     threshold: "30m"
 
+  # Completed/seeding torrents that qBittorrent reports as having metadata but
+  # no payload size and no downloaded bytes. Prefer delete over delete_file when
+  # promoting this policy, because the policy is specifically for no-data cases.
+  completed_no_data:
+    action: "warn"
+    threshold: "2m"
+    arr_mode: inherit
+
+  # Stopped/paused Arr-managed torrents are considered only when they carry at
+  # least one of these operator-managed tags. Watchdog tags under tag_sync.prefix
+  # never count as matches. match_tags is mandatory for this policy.
+  stopped_arr_managed:
+    action: "warn"
+    threshold: "10m"
+    match_tags: ["Sonarr", "Radarr"]
+    arr_mode: inherit
+
 # ---------------------------------------------------------------------------
 # Timing
 # ---------------------------------------------------------------------------
@@ -203,7 +242,8 @@ delete_confirmation_timeout: "2m"
 # Scope
 # ---------------------------------------------------------------------------
 # Names are compared case sensitively, exactly as qBittorrent reports them;
-# surrounding whitespace is trimmed.
+# surrounding whitespace is trimmed. Exact reserved-prefix operator tags are
+# rejected; case-insensitive near-misses load with a warning.
 
 # When non-empty, only these categories are considered.
 include_categories: []
@@ -282,7 +322,7 @@ readiness_max_age: "2m"
 # HTTP basic auth for the dashboard and the JSON API. Both must be set or both
 # empty. Leaving them empty while listening on a non-loopback address is
 # allowed but logged loudly. web_password and web_password_file are mutually
-# exclusive, and the file is re-read on reload.
+# exclusive, and the file is re-read when it changes.
 web_username: ""
 web_password: ""
 web_password_file: ""
@@ -296,7 +336,7 @@ metrics_public: true
 # ---------------------------------------------------------------------------
 
 # PEM bundle used to verify a qBittorrent instance with a private CA. Read at
-# load time, so rotating the bundle is picked up by a reload.
+# load time and watched, so rotating the bundle is picked up without restart.
 tls_ca_file: ""
 
 # Development-only escape hatch. Enabling it disables certificate verification

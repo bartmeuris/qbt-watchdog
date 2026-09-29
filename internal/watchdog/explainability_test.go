@@ -170,6 +170,18 @@ func TestEveryBlockedRowNamesWhatPreventsAction(t *testing.T) {
 	}
 }
 
+func TestCompletedNoDataPayloadPresentDecision(t *testing.T) {
+	s, _, clock, _ := fixture(t)
+	now := clock.Now()
+	s.state.Tracked[hashA] = store.Episode{Policy: config.CompletedNoData, FirstSeen: now, LastSeen: now}
+	s.torrents = []qbt.Torrent{{Hash: hashA, Name: "payload appeared", State: "uploading", Size: 1, TotalSize: 1024, AmountLeft: 0, Downloaded: 0}}
+	s.publish(nil)
+
+	if got := rowFor(t, s, hashA).Decision; got != DecisionPayloadPresent {
+		t.Fatal("wrong explanation", got)
+	}
+}
+
 // TestDecisionVocabularyIsClosed keeps Decisions honest: it is the list the
 // user interface is checked against, so an unlisted decision would reach an
 // operator with no explanation at all.
@@ -181,7 +193,7 @@ func TestDecisionVocabularyIsClosed(t *testing.T) {
 		}
 		seen[d] = true
 	}
-	if len(seen) != 10 {
+	if len(seen) != 11 {
 		t.Fatal("decision vocabulary changed without updating its consumers", len(seen))
 	}
 }

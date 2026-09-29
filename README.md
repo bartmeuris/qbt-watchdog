@@ -1,16 +1,16 @@
 # qbt-watchdog
 
-A small, stateful daemon that watches qBittorrent for torrents stuck in **Downloading metadata** (`metaDL`) or **stalled downloads** (`stalledDL`) across four independent policies. It measures continuously observed time, reports overdue torrents in a read-only dashboard, and can remove them after a configurable timeout.
+A small, stateful daemon that watches qBittorrent for torrents stuck in **Downloading metadata** (`metaDL`), **stalled downloads** (`stalledDL`), completed-looking torrents with no payload, or explicitly tagged stopped Arr-managed torrents across independent policies. It measures continuously observed time, reports overdue torrents in a read-only dashboard, and can remove them after a configurable timeout.
 
-**Start in dry-run mode.** Dry-run is enabled by default and never calls the delete endpoint. Enabling deletion requires the deliberate setting `dry_run: false` in the configuration file. Removal preserves payload files by default; `action: delete_file` can permanently delete downloaded data through qBittorrent and is irreversible.
+**Start in dry-run mode.** Dry-run is enabled by default and never calls the delete endpoint or writes qBittorrent watchdog tags. Enabling deletion requires the deliberate setting `dry_run: false` in the configuration file. Removal preserves payload files by default; `action: delete_file` can permanently delete downloaded data through qBittorrent and is irreversible.
 
-This is not a general torrent manager. It does not diagnose metadata failures, manage normal completed downloads, implement BitTorrent, integrate with Prowlarr, or manage multiple qBittorrent instances in one process. Optional Sonarr/Radarr recovery can blocklist/search after watchdog-controlled qBittorrent cleanup; it never manages import libraries and never deletes imported episode/movie files.
+This is not a general torrent manager. It does not diagnose metadata failures, manage normal completed downloads with payload, implement BitTorrent, integrate with Prowlarr, or manage multiple qBittorrent instances in one process. Optional Sonarr/Radarr recovery can blocklist/search after watchdog-controlled qBittorrent cleanup; it never manages import libraries and never deletes imported episode/movie files.
 
 ## Prerequisites and compatibility
 
 - Enable qBittorrent's WebUI and make it reachable from the watchdog. Use the WebUI base URL, not a URL ending in `/api/v2`. HTTP and HTTPS are supported, including a reverse-proxy base path.
 - Target: qBittorrent WebUI API v2 as documented for [qBittorrent 5.x](<https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-5.0)>). Recent 4.x/5.x installations are expected to work if they expose the required endpoints and fields. API-key authentication requires qBittorrent >= 5.2.0 (WebUI API >= 2.14.1). **Integration against a real qBittorrent instance has not been verified.** Validate your installation in dry-run before enabling deletion.
-- Required endpoints under `/api/v2/`: `auth/login` (SID mode only), `app/version`, `app/webapiVersion`, `torrents/info` (all torrents and a single `hashes` value), and `torrents/delete`.
+- Required endpoints under `/api/v2/`: `auth/login` (SID mode only), `app/version`, `app/webapiVersion`, `torrents/info` (all torrents and a single `hashes` value), `torrents/delete`, and `torrents/addTags` / `torrents/removeTags` when `tag_sync.enabled` is true or while a previously claimed prefix is being swept with sync disabled and `dry_run: false`.
 - Three authentication modes: API key (`qbt_api_key` or `qbt_api_key_file`), username/password (SID cookie), or bypass (all credentials empty). API-key and username/password modes are mutually exclusive.
 - Container deployment requires Docker with BuildKit; the supplied example also requires Docker Compose and an existing network shared with qBittorrent.
 - Source builds use Go **1.27.1**, confirmed against the [official downloads page](https://go.dev/dl/) for this implementation. The builder image pins `golang:1.27.1-alpine`; that builder has successfully built. Runtime containers need neither Go nor a shell.
@@ -67,7 +67,7 @@ chmod 750 secrets
 chmod 640 secrets/qbt_api_key
 ```
 
-Local Compose secrets are file mounts, not an encrypted secret store. File ownership behavior varies with Docker Desktop, rootless Docker, and user-namespace mappings; arrange equivalent readable permissions for the mapped container identity. UID/GID 65532 must be able to traverse every parent directory and read the mounted secret files. Do not solve permission errors by making secrets public. Secret files are read at startup and on reload, limited to 64 KiB, and have trailing CR/LF removed.
+Local Compose secrets are file mounts, not an encrypted secret store. File ownership behavior varies with Docker Desktop, rootless Docker, and user-namespace mappings; arrange equivalent readable permissions for the mapped container identity. UID/GID 65532 must be able to traverse every parent directory and read the mounted secret files. Do not solve permission errors by making secrets public. Secret files are read at startup and re-read when their files change, limited to 64 KiB, and have trailing CR/LF removed.
 
 Mount configuration as a directory rather than a single file. The watchdog watches the directory containing the resolved config file so it can notice atomic replacements of `config.yaml` and `.env` as well as secret/ConfigMap symlink swaps. Real `.env` files and `config/`/`secrets/` directories are ignored by Git and excluded from Docker build context by this repository.
 
@@ -191,11 +191,11 @@ An optional `.env` file is loaded from the directory containing the resolved con
 
 Supported `.env` syntax is deliberately small: one `NAME=value` assignment per line; optional `export`; spaces around `=`; blank lines, comments, CRLF line endings, and single/double quoted values. Duplicate names use the last value. Single quotes are fully literal. Double quotes decode only `\n`, `\r`, `\t`, `\\`, `\"` and `\$`; all other escapes, multiline quotes and trailing tokens are errors. In unquoted values, `#` begins a comment only at the start of the value or after horizontal whitespace. `.env` does not expand `$NAME`, `${NAME}`, `$$`, backticks or command substitutions.
 
-The watcher reloads both `config.yaml` and adjacent `.env` changes automatically, including atomic replacement. Mount the containing config directory into containers instead of bind-mounting only the file, and ensure UID/GID 65532 can traverse the directory and read any referenced secret files. Real `.env` files are Git-ignored and Docker-ignored. `.env.example` is committed as a placeholder template but excluded from Docker build context by `.dockerignore`; it still must never contain real secrets.
+The watcher reloads both `config.yaml` and adjacent `.env` changes automatically, including atomic replacement. Referenced secret files and TLS CA bundles are watched through their parent directories so direct writes and atomic replacements trigger a reload without idle polling. Mount the containing config directory into containers instead of bind-mounting only the file, and ensure UID/GID 65532 can traverse the directory and read any referenced secret files. Real `.env` files are Git-ignored and Docker-ignored. `.env.example` is committed as a placeholder template but excluded from Docker build context by `.dockerignore`; it still must never contain real secrets.
 
 ### Reloading
 
-The configuration file is re-read automatically whenever it changes; there is no need to restart or send a signal. Atomic replacements (write-to-temp then rename) and Kubernetes ConfigMap/Secret symlink swaps are detected, and rapid bursts of writes are debounced into a single reload.
+The configuration file is re-read automatically whenever it or a referenced dependency changes; there is no need to restart or send a signal. Atomic replacements (write-to-temp then rename) and Kubernetes ConfigMap/Secret symlink swaps are detected, and rapid bursts of writes are debounced into a single reload.
 
 If a reload is invalid, the previously running configuration is kept in full, the problem is logged, and the error is surfaced in the status payload and on the readiness endpoint until a good file is written.
 
@@ -204,7 +204,7 @@ If a reload is invalid, the previously running configuration is kept in full, th
 - `listen` (the socket is already bound)
 - `state_file` (the episode store is already open)
 
-**Applied live** -- everything else, including the qBittorrent endpoint, credentials (including API key) and TLS settings (the HTTP client is rebuilt), all four policies, every interval, the category/tag exclusions, `log_level`, `log_format`, the readiness and UI settings, and Sonarr/Radarr integrations. Password files, API key files, integration key files, `.env`, and the CA bundle are re-read on every reload, so rotating a mounted secret needs no restart.
+**Applied live** -- everything else, including the qBittorrent endpoint, credentials (including API key) and TLS settings (the HTTP client is rebuilt), all policies, every interval, the category/tag exclusions, `tag_sync`, `log_level`, `log_format`, the readiness and UI settings, and Sonarr/Radarr integrations. Password files, API key files, integration key files, `.env`, and the CA bundle are watched and re-read when they change, so rotating a mounted secret needs no restart.
 
 **Safety-affecting reloads reset timers.** Changing anything that could change the qBittorrent cleanup outcome -- a policy, `dry_run`, an interval, the exclusions, the action cap, qBittorrent credentials (including API key), or TLS CA/insecure verification settings -- resets policy timers as applicable so no torrent inherits unsafe elapsed time across a configuration change. Sonarr/Radarr-only changes do not reset qBittorrent policy clocks. The finite attempt budget and a delete request still awaiting confirmation are deliberately preserved across ordinary safety reloads; a reload is not a licence to retry something already in flight. Exception: changing the qBittorrent endpoint clears per-torrent clocks, pending request markers, retry budgets, and seeder observations, because old endpoint-scoped state cannot be trusted for a different WebUI.
 
@@ -244,7 +244,7 @@ integrations:
     timeout: "10s"
 ```
 
-An enabled integration requires a valid HTTP(S) `url` and exactly one credential source: `api_key` or `api_key_file`. Disabled stubs may leave credentials empty, but malformed URLs, bad modes, invalid timeouts and conflicting credential sources are still rejected. `api_key_file` is read on every reload and has trailing CR/LF stripped. Empty `categories` means the integration handles all qBittorrent categories; non-empty lists are exact, case-sensitive matches.
+An enabled integration requires a valid HTTP(S) `url` and exactly one credential source: `api_key` or `api_key_file`. Disabled stubs may leave credentials empty, but malformed URLs, bad modes, invalid timeouts and conflicting credential sources are still rejected. `api_key_file` is re-read when its file changes and has trailing CR/LF stripped. Empty `categories` means the integration handles all qBittorrent categories; non-empty lists are exact, case-sensitive matches.
 
 Modes:
 
@@ -267,6 +267,8 @@ integrations:
 
 Recovery requires all of these: an enabled integration matching the torrent category, `dry_run: false`, a destructive effective policy (`delete` or `delete_file`), and `max_actions_per_poll` greater than zero. Warn-only and dry-run configurations never mutate Sonarr/Radarr. qBittorrent cleanup is not blocked by Arr outages: the watchdog captures recovery identity before deletion, but it makes no Arr network calls between the final qBittorrent safety read and the qBittorrent delete request.
 
+Each policy may override recovery with `arr_mode: inherit` (default), `none`, `blocklist_and_search`, or `search_only`. Service-level `integrations.<service>.mode` accepts only `blocklist_and_search` or `search_only`.
+
 Recovery identity is the exact qBittorrent torrent hash / Arr `downloadId`, never a torrent or release name. Sonarr season packs are aggregated into one recovery job containing all matching queue rows and episode IDs. The recovery workflow starts only after qBittorrent accepts deletion **and** a later successful full qBittorrent poll confirms that the hash disappeared. The Arr call never deletes imported media files; even blocklisting uses `removeFromClient=false`, because qBittorrent cleanup already happened under the watchdog's policy.
 
 Safety details and limits:
@@ -280,7 +282,7 @@ Safety details and limits:
 
 ### Protecting torrents
 
-Add the qBittorrent tag **`keep`** or **`qbt-watchdog-ignore`** to protect a torrent with the defaults. Lists are comma-separated, trimmed, and compared case-sensitively as exact strings; there are no wildcards. Empty elements are ignored. Configuring `exclude_tags` replaces the defaults, so include the default tags if you want to retain them.
+Add the qBittorrent tag **`keep`** or **`qbt-watchdog-ignore`** to protect a torrent with the defaults. Lists are comma-separated, trimmed, and compared case-sensitively as exact strings; there are no wildcards. Empty elements are ignored. Configuring `exclude_tags` replaces the defaults, so include the default tags if you want to retain them. Tags beginning with the reserved watchdog prefix (default `qbtw-`) are ignored for protection and policy matching and cannot be configured as `exclude_tags` or `match_tags`; case-insensitive prefix near-misses are accepted with a warning.
 
 For example, restrict actions to category `temporary`, but always protect category `archive` and tag `manual`:
 
@@ -294,7 +296,7 @@ Category exclusion and excluded tags win over category inclusion. Protected torr
 
 ## Policies
 
-Four mutually exclusive policies cover every torrent the watchdog considers. Each has an `action` and a `threshold`. A torrent must match the same policy continuously for the whole threshold before the action is taken; any change of state, progress, or seeder observation starts the clock again.
+Policies are mutually exclusive. Each has an `action`, a `threshold`, and an optional `arr_mode`. `stopped_arr_managed` also has mandatory `match_tags`. A torrent must match the same policy continuously for the whole threshold before the action is taken; any change of state, progress, seeder observation, tag match, or payload evidence starts the clock again.
 
 | Policy                 | Condition                                                      | Description                                                                                                                         |
 | ---------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
@@ -302,6 +304,8 @@ Four mutually exclusive policies cover every torrent the watchdog considers. Eac
 | `stalled_no_seeders`   | `state == "stalledDL"`, zero progress, seeders never observed  | Stalled downloads most likely genuinely dead.                                                                                       |
 | `stalled_seeders_seen` | `state == "stalledDL"`, zero progress, seeders observed before | Stalled downloads where the swarm may simply be idle.                                                                               |
 | `stalled_partial`      | `state == "stalledDL"`, `0 < progress < 1`                     | Stalled downloads that made some progress. This is the only policy that acts despite downloaded bytes; treat with the most caution. |
+| `completed_no_data`    | upload/seeding/stopped-UP state, `size == 0`, `total_size > 0`, `downloaded == 0`, `amount_left == 0` | Completed-looking torrents with metadata but no payload. Default threshold: `2m`. Takes precedence over `stopped_arr_managed`. |
+| `stopped_arr_managed`  | `stoppedUP`, `pausedUP`, `stoppedDL`, or `pausedDL` with any configured `match_tags` | Operator-stopped Arr-managed torrents. Default action/threshold: `warn` after `10m`. Can delete/blocklist/search if you configure destructive action, Arr recovery, and `dry_run: false`. |
 
 Actions:
 
@@ -310,6 +314,21 @@ Actions:
 - `delete_file` -- remove the torrent and its downloaded files; irreversible.
 
 **`dry_run` overrides every action to `warn`.** A destructive action requires both the configured action and `dry_run: false`. Enabling `delete_file` requires additionally setting `action: delete_file` on the relevant policy.
+
+### qBittorrent tag sync
+
+`tag_sync` can write status tags back to qBittorrent under a reserved prefix:
+
+```yaml
+tag_sync:
+  enabled: false
+  prefix: "qbtw-"
+  max_writes_per_poll: 20
+```
+
+When enabled and not in dry-run, the watchdog writes `<prefix><policy>` for tracked torrents and `<prefix>due` once their threshold is met. It removes stale tags in that namespace from all listed torrents, bounded by `max_writes_per_poll`; this cap is independent of `max_actions_per_poll`. Tag API calls are made only for actual add/remove deltas. Dry-run suppresses all tag writes, including cleanup sweeps.
+
+The prefix is claimed in the state file before the first external tag write and is intentionally **not** part of the qBittorrent endpoint key. If you change the prefix while sync is enabled and the state file already claims another prefix, startup/polling and hot reload refuse the new enabled prefix. Remediation: set `tag_sync.enabled: false` and the new prefix with `dry_run: false` (sweeps are suppressed in dry-run), let the watchdog sweep tags using the old persisted prefix, then re-enable. Partial sweeps keep the old prefix in state so re-enabling cannot orphan tags. Renaming, deleting, or editing the state file is an escape hatch, but it loses tracking history, counters, retry budgets, recovery jobs, and the ability to clean old tags safely.
 
 ### Seed history
 
@@ -333,7 +352,7 @@ The watchdog tracks whether connected seeders have ever been observed for each t
 
 ## State and persistence
 
-State is a schema-versioned JSON file (current: schema version 4). It stores full hashes as tracking keys, first/last observations, pending timestamps, attempt counts, per-episode dry-run markers, seed-observation flags, lifetime counters, bounded audit history, and bounded recovery jobs. Schema 4 keeps durable recovery jobs separate from audit history. **Audit history stores torrent names and short hashes.** Treat the state volume and backups as private. Credentials, cookies, magnet URIs, and qBittorrent save paths are not intentionally stored. Torrent names themselves are user-controlled and may contain sensitive text.
+State is a schema-versioned JSON file (current: schema version 4). It stores full hashes as tracking keys, first/last observations, pending timestamps, attempt counts, per-episode dry-run markers, seed-observation flags, the claimed watchdog tag prefix, lifetime counters, bounded audit history, and bounded recovery jobs. Schema 4 keeps durable recovery jobs separate from audit history. **Audit history stores torrent names and short hashes.** Treat the state volume and backups as private. Credentials, cookies, magnet URIs, and qBittorrent save paths are not intentionally stored. Torrent names themselves are user-controlled and may contain sensitive text.
 
 State writes use a same-directory temporary file with mode `0600`, flush, atomic rename, and directory sync. Keep only **one watchdog process per state file**; there is no cross-process locking. Back up state while the daemon is stopped. Removing state loses clocks, retry limits, counters, and deduplication markers; do not remove it simply to force another deletion attempt.
 

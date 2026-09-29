@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +27,8 @@ type Client interface {
 	List(context.Context) ([]qbt.Torrent, error)
 	Get(context.Context, string) (*qbt.Torrent, error)
 	Delete(context.Context, string, bool) error
+	AddTags(context.Context, []string, string) error
+	RemoveTags(context.Context, []string, string) error
 }
 type Clock interface{ Now() time.Time }
 type RealClock struct{}
@@ -51,11 +55,17 @@ type Row struct {
 	State            string        `json:"state"`
 	Progress         float64       `json:"progress"`
 	Downloaded       int64         `json:"downloaded"`
+	Size             int64         `json:"size"`
+	TotalSize        int64         `json:"total_size"`
+	Completed        int64         `json:"completed"`
+	AmountLeft       int64         `json:"amount_left"`
 	DownloadSpeed    int64         `json:"download_speed"`
 	NumSeeds         int           `json:"num_seeds"`
 	NumLeechers      int           `json:"num_leechers"`
 	Category         string        `json:"category"`
 	Tags             string        `json:"tags"`
+	WatchdogTags     []string      `json:"watchdog_tags"`
+	DesiredTags      []string      `json:"desired_watchdog_tags"`
 	AddedAt          *time.Time    `json:"added_at"`
 	FirstSeen        *time.Time    `json:"first_seen_policy"`
 	Elapsed          float64       `json:"elapsed_seconds"`
@@ -81,6 +91,7 @@ type Snapshot struct {
 	SchemaVersion    int                 `json:"schema_version"`
 	Build            observability.Build `json:"build"`
 	DryRun           bool                `json:"dry_run"`
+	TagSync          TagSyncStatus       `json:"tag_sync"`
 	QBTUp            bool                `json:"qbt_up"`
 	QBTVersion       string              `json:"qbt_version"`
 	WebAPIVersion    string              `json:"webapi_version"`
@@ -96,6 +107,14 @@ type Snapshot struct {
 	Torrents         []Row               `json:"torrents"`
 	History          []store.Event       `json:"history"`
 	RefreshSeconds   float64             `json:"refresh_seconds"`
+}
+
+type TagSyncStatus struct {
+	Enabled          bool   `json:"enabled"`
+	Prefix           string `json:"prefix"`
+	PersistedPrefix  string `json:"persisted_prefix"`
+	DryRunSuppressed bool   `json:"dry_run_suppressed"`
+	MaxWritesPerPoll int    `json:"max_writes_per_poll"`
 }
 
 type Service struct {
@@ -170,6 +189,9 @@ func (s *Service) Snapshot() Snapshot {
 	v.Torrents = slices.Clone(v.Torrents)
 	v.History = slices.Clone(v.History)
 	v.Policies = slices.Clone(v.Policies)
+	for i := range v.Policies {
+		v.Policies[i].MatchTags = slices.Clone(v.Policies[i].MatchTags)
+	}
 	v.Integrations = slices.Clone(v.Integrations)
 	v.RecoveryJobs = slices.Clone(v.RecoveryJobs)
 	v.LastSuccess = cloneTime(v.LastSuccess)
@@ -177,6 +199,8 @@ func (s *Service) Snapshot() Snapshot {
 	for i := range v.Torrents {
 		v.Torrents[i].FirstSeen = cloneTime(v.Torrents[i].FirstSeen)
 		v.Torrents[i].AddedAt = cloneTime(v.Torrents[i].AddedAt)
+		v.Torrents[i].WatchdogTags = slices.Clone(v.Torrents[i].WatchdogTags)
+		v.Torrents[i].DesiredTags = slices.Clone(v.Torrents[i].DesiredTags)
 	}
 	return v
 }
@@ -196,16 +220,42 @@ func (s *Service) protected(t qbt.Torrent) bool {
 	if len(s.c.IncludeCategories) > 0 && !slices.Contains(s.c.IncludeCategories, t.Category) {
 		return true
 	}
-	for _, tag := range config.Split(t.Tags) {
+	for _, tag := range s.operatorTags(t.Tags) {
 		if slices.Contains(s.c.ExcludeTags, tag) {
 			return true
 		}
 	}
 	return false
 }
+
+func (s *Service) operatorTags(raw string) []string {
+	tags := config.Split(raw)
+	result := tags[:0]
+	for _, tag := range tags {
+		if !s.isWatchdogTag(tag) {
+			result = append(result, tag)
+		}
+	}
+	return result
+}
+
+func (s *Service) isWatchdogTag(tag string) bool {
+	if strings.HasPrefix(tag, s.c.TagSync.Prefix) {
+		return true
+	}
+	return s.state.WatchdogTagPrefix != "" && strings.HasPrefix(tag, s.state.WatchdogTagPrefix)
+}
+
 func (s *Service) decision(t qbt.Torrent, e store.Episode, now time.Time) string {
 	id := s.policy(t)
+	if id == "" && completedStates[t.State] && t.TotalSize > 0 && !zeroPayload(t) {
+		return DecisionPayloadPresent
+	}
 	if id == "" {
+		return DecisionNotApplicable
+	}
+	p, ok := s.c.Policies[id]
+	if !ok {
 		return DecisionNotApplicable
 	}
 	if s.protected(t) {
@@ -214,7 +264,10 @@ func (s *Service) decision(t qbt.Torrent, e store.Episode, now time.Time) string
 	if id == config.Metadata && t.Progress != 0 {
 		return DecisionNonzeroProgress
 	}
-	if id != config.StalledPartial && t.Downloaded != 0 {
+	if id == config.CompletedNoData && !zeroPayload(t) {
+		return DecisionPayloadPresent
+	}
+	if id != config.StalledPartial && id != config.StoppedArrManaged && t.Downloaded != 0 {
 		return DecisionNonzeroDownloaded
 	}
 	if e.DeleteRequestedAt != nil {
@@ -223,7 +276,7 @@ func (s *Service) decision(t qbt.Torrent, e store.Episode, now time.Time) string
 	if e.Policy != id || e.FirstSeen.IsZero() || now.Before(e.LastSeen) || now.Sub(e.LastSeen) > s.c.MaxObservationGap {
 		return DecisionTracking
 	}
-	if now.Sub(e.FirstSeen) < s.c.Policies[id].Threshold {
+	if now.Sub(e.FirstSeen) < p.Threshold {
 		return DecisionTracking
 	}
 	if s.c.MaxDeletions == 0 {
@@ -332,29 +385,34 @@ func (s *Service) fail(err error) {
 	s.log.Warn("poll failed", "event", "poll_error", "error", err)
 }
 func (s *Service) persist() {
+	_ = s.persistState()
+}
+
+func (s *Service) persistState() bool {
 	if s.writeBlocked {
-		return
+		return false
 	}
 	s.state.SafetyKey, s.state.EndpointKey = s.c.SafetyKey(), s.c.EndpointKey()
 	data, err := json.Marshal(s.state)
 	if err != nil {
 		s.view.PersistenceError = "cannot encode state"
 		s.savedKnown = false
-		return
+		return false
 	}
 	digest := sha256.Sum256(data)
 	if s.savedKnown && digest == s.savedDigest && s.view.PersistenceError == "" {
-		return
+		return true
 	}
 	if err := s.disk.Save(s.state); err != nil {
 		s.savedKnown = false
 		s.view.PersistenceError = err.Error()
 		s.metrics.StateErrors.Inc()
 		s.log.Error("state write failed", "event", "state_write_error", "error", err)
-		return
+		return false
 	}
 	s.view.PersistenceError = ""
 	s.savedKnown, s.savedDigest = true, digest
+	return true
 }
 
 // Poll is serialized even when called outside Run. Initial list and candidate
@@ -370,6 +428,10 @@ func (s *Service) Poll(ctx context.Context) error {
 	started := time.Now()
 	defer func() { s.metrics.Duration.Observe(time.Since(started).Seconds()) }()
 	defer func() { s.persist(); s.publish(nil) }()
+	if err := s.tagPrefixBootError(); err != nil {
+		s.fail(err)
+		return err
+	}
 	app, api, err := s.client.Versions(ctx)
 	if err != nil {
 		s.fail(err)
@@ -515,6 +577,10 @@ func (s *Service) Poll(ctx context.Context) error {
 		s.event("action_requested", "accepted", *confirmed, "")
 		s.persist()
 	}
+	if err := s.syncWatchdogTags(ctx, now); err != nil {
+		s.fail(err)
+		return err
+	}
 	s.log.Debug("poll succeeded", "event", "poll_success", "torrents", len(ts))
 	return nil
 }
@@ -532,11 +598,170 @@ func (s *Service) replaceTorrent(hash string, t *qbt.Torrent) {
 	}
 }
 
+func (s *Service) tagPrefixBootError() error {
+	if !s.c.TagSync.Enabled || s.state.WatchdogTagPrefix == "" || s.state.WatchdogTagPrefix == s.c.TagSync.Prefix {
+		return nil
+	}
+	return fmt.Errorf("tag_sync prefix mismatch: state claims %q, config wants %q; disable tag_sync to remediate", s.state.WatchdogTagPrefix, s.c.TagSync.Prefix)
+}
+
+func (s *Service) ensureTagPrefixClaim() bool {
+	if s.state.WatchdogTagPrefix == s.c.TagSync.Prefix {
+		return true
+	}
+	if s.state.WatchdogTagPrefix != "" && s.state.WatchdogTagPrefix != s.c.TagSync.Prefix {
+		s.view.PersistenceError = "tag_sync prefix mismatch; disable tag_sync to remediate"
+		return false
+	}
+	s.state.WatchdogTagPrefix = s.c.TagSync.Prefix
+	if s.persistState() {
+		return true
+	}
+	s.state.WatchdogTagPrefix = ""
+	return false
+}
+
+func (s *Service) syncWatchdogTags(ctx context.Context, now time.Time) error {
+	if s.c.DryRun {
+		return nil
+	}
+	if s.state.WatchdogTagPrefix != "" && !s.c.TagSync.Enabled {
+		return s.sweepWatchdogTags(ctx, s.state.WatchdogTagPrefix)
+	}
+	if !s.c.TagSync.Enabled {
+		return nil
+	}
+	if !s.ensureTagPrefixClaim() {
+		return nil
+	}
+	addByTag := map[string][]string{}
+	removeByTag := map[string][]string{}
+	for _, t := range s.torrents {
+		e := s.state.Tracked[t.Hash]
+		if e.DeleteRequestedAt != nil {
+			continue
+		}
+		actual := stringSet(s.watchdogTags(t.Tags, s.c.TagSync.Prefix))
+		desired := stringSet(s.desiredWatchdogTags(t, now))
+		for tag := range desired {
+			if !actual[tag] {
+				addByTag[tag] = append(addByTag[tag], t.Hash)
+			}
+		}
+		for tag := range actual {
+			if !desired[tag] {
+				removeByTag[tag] = append(removeByTag[tag], t.Hash)
+			}
+		}
+	}
+	return s.applyTagWrites(ctx, addByTag, removeByTag, s.c.TagSync.MaxWritesPerPoll)
+}
+
+func (s *Service) sweepWatchdogTags(ctx context.Context, prefix string) error {
+	removeByTag := map[string][]string{}
+	for _, t := range s.torrents {
+		for _, tag := range s.watchdogTags(t.Tags, prefix) {
+			removeByTag[tag] = append(removeByTag[tag], t.Hash)
+		}
+	}
+	if len(removeByTag) == 0 {
+		s.state.WatchdogTagPrefix = ""
+		return nil
+	}
+	complete, err := s.applyTagWritesBounded(ctx, nil, removeByTag, s.c.TagSync.MaxWritesPerPoll)
+	if err != nil {
+		return err
+	}
+	if complete {
+		s.state.WatchdogTagPrefix = ""
+	}
+	return nil
+}
+
+func (s *Service) applyTagWrites(ctx context.Context, addByTag, removeByTag map[string][]string, limit int) error {
+	_, err := s.applyTagWritesBounded(ctx, addByTag, removeByTag, limit)
+	return err
+}
+
+func (s *Service) applyTagWritesBounded(ctx context.Context, addByTag, removeByTag map[string][]string, limit int) (bool, error) {
+	writes := 0
+	for _, tag := range sortedKeys(removeByTag) {
+		if writes >= limit {
+			return false, nil
+		}
+		if err := s.client.RemoveTags(ctx, removeByTag[tag], tag); err != nil && !benignTagRace(err) {
+			return false, err
+		}
+		writes++
+	}
+	for _, tag := range sortedKeys(addByTag) {
+		if writes >= limit {
+			return false, nil
+		}
+		if err := s.client.AddTags(ctx, addByTag[tag], tag); err != nil && !benignTagRace(err) {
+			return false, err
+		}
+		writes++
+	}
+	return true, nil
+}
+
+func sortedKeys(m map[string][]string) []string {
+	keys := make([]string, 0, len(m))
+	for key, hashes := range m {
+		if len(hashes) > 0 {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func benignTagRace(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "404") || strings.Contains(message, "not found")
+}
+
+func (s *Service) watchdogTags(raw, prefix string) []string {
+	tags := []string{}
+	for _, tag := range config.Split(raw) {
+		if strings.HasPrefix(tag, prefix) {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
+
+func (s *Service) desiredWatchdogTags(t qbt.Torrent, now time.Time) []string {
+	e, ok := s.state.Tracked[t.Hash]
+	if !ok || e.DeleteRequestedAt != nil || e.Policy == "" || e.Policy != s.matchingPolicy(t) {
+		return nil
+	}
+	policy, ok := s.c.Policies[e.Policy]
+	if !ok {
+		return nil
+	}
+	desired := []string{s.c.TagSync.Prefix + string(e.Policy)}
+	if !e.FirstSeen.IsZero() && now.Sub(e.FirstSeen) >= policy.Threshold {
+		desired = append(desired, s.c.TagSync.Prefix+"due")
+	}
+	return desired
+}
+
+func stringSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
+}
+
 func (s *Service) publish(next *time.Time) {
 	now := s.clock.Now().UTC()
 	v := s.view
 	v.Integrations, v.RecoveryJobs = s.recoverySnapshot(now)
 	v.DryRun = s.c.DryRun
+	v.TagSync = TagSyncStatus{Enabled: s.c.TagSync.Enabled, Prefix: s.c.TagSync.Prefix, PersistedPrefix: s.state.WatchdogTagPrefix, DryRunSuppressed: s.c.DryRun, MaxWritesPerPoll: s.c.TagSync.MaxWritesPerPoll}
 	v.RefreshSeconds = s.c.UIRefreshInterval.Seconds()
 	v.ConfigStatus = s.manager.Status()
 	healthy := 0.
@@ -547,8 +772,11 @@ func (s *Service) publish(next *time.Time) {
 	s.metrics.ConfigGeneration.Set(float64(v.ConfigStatus.Generation))
 	v.Policies = nil
 	for _, id := range config.PolicyIDs() {
-		p := s.c.Policies[id]
-		v.Policies = append(v.Policies, PolicyView{id, p.Action, s.c.EffectiveAction(id), p.Threshold.Seconds()})
+		p, ok := s.c.Policies[id]
+		if !ok {
+			continue
+		}
+		v.Policies = append(v.Policies, PolicyView{Policy: id, Action: p.Action, EffectiveAction: s.c.EffectiveAction(id), ThresholdSeconds: p.Threshold.Seconds(), MatchTags: slices.Clone(p.MatchTags)})
 	}
 	// Rows read their configured action, effective action and threshold from
 	// the published per-policy model, so the table can never disagree with the
@@ -571,8 +799,9 @@ func (s *Service) publish(next *time.Time) {
 	for _, t := range s.torrents {
 		e := s.state.Tracked[t.Hash]
 		decision := s.decision(t, e, now)
-		r := Row{Name: t.Name, ShortHash: qbt.ShortHash(t.Hash), State: t.State, Progress: t.Progress, Downloaded: t.Downloaded, DownloadSpeed: t.DownloadSpeed, NumSeeds: t.NumSeeds, NumLeechers: t.NumLeechers, Category: t.Category, Tags: t.Tags, Decision: decision}
+		r := Row{Name: t.Name, ShortHash: qbt.ShortHash(t.Hash), State: t.State, Progress: t.Progress, Downloaded: t.Downloaded, Size: t.Size, TotalSize: t.TotalSize, Completed: t.Completed, AmountLeft: t.AmountLeft, DownloadSpeed: t.DownloadSpeed, NumSeeds: t.NumSeeds, NumLeechers: t.NumLeechers, Category: t.Category, Tags: t.Tags, WatchdogTags: s.watchdogTags(t.Tags, s.c.TagSync.Prefix), Decision: decision}
 		r.Policy = s.policy(t)
+		r.DesiredTags = s.desiredWatchdogTags(t, now)
 		r.SeedObserved = s.state.SeedObserved[t.Hash]
 		if p, classified := byPolicy[r.Policy]; classified {
 			r.ConfiguredAction, r.EffectiveAction, r.ThresholdSeconds = p.Action, p.EffectiveAction, p.ThresholdSeconds

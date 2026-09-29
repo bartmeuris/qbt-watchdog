@@ -32,9 +32,10 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"go.yaml.in/yaml/v3"
 )
 
-// PolicyID names one of the four uniform cleanup policies. Every torrent that
+// PolicyID names one of the five uniform cleanup policies. Every torrent that
 // the watchdog considers falls into exactly one of them.
 type PolicyID string
 
@@ -49,10 +50,15 @@ const (
 	StalledSeedersSeen PolicyID = "stalled_seeders_seen"
 	// StalledPartial covers stalledDL torrents that made some progress.
 	StalledPartial PolicyID = "stalled_partial"
+	// CompletedNoData covers completed-looking torrents that carry no payload.
+	CompletedNoData PolicyID = "completed_no_data"
+	// StoppedArrManaged covers operator-stopped Arr-managed torrents selected by
+	// explicit operator tags.
+	StoppedArrManaged PolicyID = "stopped_arr_managed"
 )
 
 func PolicyIDs() []PolicyID {
-	return []PolicyID{Metadata, StalledNoSeeders, StalledSeedersSeen, StalledPartial}
+	return []PolicyID{Metadata, StalledNoSeeders, StalledSeedersSeen, StalledPartial, CompletedNoData, StoppedArrManaged}
 }
 func (id PolicyID) Valid() bool { return slices.Contains(PolicyIDs(), id) }
 
@@ -69,10 +75,19 @@ func Actions() []Action            { return []Action{Warn, Delete, DeleteFile} }
 func (a Action) Valid() bool       { return slices.Contains(Actions(), a) }
 func (a Action) Destructive() bool { return a == Delete || a == DeleteFile }
 
-// Policy is the uniform shape shared by all four cleanup policies.
+// Policy is the uniform shape shared by all cleanup policies.
 type Policy struct {
 	Action    Action        `json:"action"`
 	Threshold time.Duration `json:"threshold"`
+	ArrMode   ArrMode       `json:"arr_mode"`
+	MatchTags []string      `json:"match_tags,omitempty"`
+}
+
+// TagSync owns the qBittorrent tag namespace used for optional write-back.
+type TagSync struct {
+	Enabled          bool   `json:"enabled"`
+	Prefix           string `json:"prefix"`
+	MaxWritesPerPoll int    `json:"max_writes_per_poll"`
 }
 
 // Config is an immutable, fully validated snapshot of the configuration file.
@@ -86,8 +101,9 @@ type Policy struct {
 //     with a warning and the previous configuration is retained in full.
 //   - Applied live: everything else, including the qBittorrent endpoint,
 //     credentials and TLS settings (the HTTP client is rebuilt), policies,
-//     intervals, exclusions, log level and format, the readiness/UI settings,
-//     and the Sonarr/Radarr integrations (their clients are rebuilt too).
+//     intervals, exclusions, tag_sync, log level and format, the readiness/UI
+//     settings, and the Sonarr/Radarr integrations (their clients are rebuilt
+//     too).
 type Config struct {
 	// TLSCAPEM is the CA bundle read from TLSCAFile at parse time, so a
 	// rotated bundle is picked up by the same reload that re-reads secrets.
@@ -102,6 +118,7 @@ type Config struct {
 	DeleteConfirmationTimeout, UIRefreshInterval, ReadinessMaxAge time.Duration
 
 	DryRun, MetricsPublic, TLSInsecure, Once bool
+	TagSync                                  TagSync
 
 	// MaxDeletions caps destructive actions per poll; 0 disables them.
 	MaxDeletions, HistoryLimit int
@@ -132,6 +149,7 @@ func (c Config) Clone() Config {
 	c.ExcludeTags = slices.Clone(c.ExcludeTags)
 	p := make(map[PolicyID]Policy, len(c.Policies))
 	for id, policy := range c.Policies {
+		policy.MatchTags = slices.Clone(policy.MatchTags)
 		p[id] = policy
 	}
 	c.Policies = p
@@ -145,10 +163,32 @@ func (c Config) EffectiveAction(id PolicyID) Action {
 	if c.DryRun {
 		return Warn
 	}
-	return c.Policies[id].Action
+	policy, ok := c.Policies[id]
+	if !ok {
+		return Warn
+	}
+	return policy.Action
+}
+
+func (c Config) EffectiveArrMode(id PolicyID, svc ArrService) (ArrMode, bool) {
+	policy, ok := c.Policies[id]
+	if !ok {
+		return "", false
+	}
+	mode := policy.ArrMode
+	if mode == NoArrMode {
+		return "", false
+	}
+	if mode == "" || mode == InheritArrMode {
+		return svc.Mode, true
+	}
+	return mode, true
 }
 
 func (c Config) EndpointKey() string {
+	// Endpoint identity is only the qBittorrent URL. The tag_sync prefix is
+	// persisted separately so prefix remediation can survive endpoint-stable
+	// reloads and restarts.
 	h := sha256.Sum256([]byte(c.URL.String()))
 	return hex.EncodeToString(h[:])
 }
@@ -156,15 +196,24 @@ func (c Config) EndpointKey() string {
 // SafetyKey hashes safety settings and credentials, never persisting their raw
 // values, so changed credentials cannot inherit elapsed time across a restart.
 func (c Config) SafetyKey() string {
+	type safetyPolicy struct {
+		Action    Action
+		Threshold time.Duration
+		MatchTags []string
+	}
+	policies := make(map[PolicyID]safetyPolicy, len(c.Policies))
+	for id, policy := range c.Policies {
+		policies[id] = safetyPolicy{Action: policy.Action, Threshold: policy.Threshold, MatchTags: policy.MatchTags}
+	}
 	v := struct {
 		URL                           string
 		Credentials                   [3]string
-		Policies                      map[PolicyID]Policy
+		Policies                      map[PolicyID]safetyPolicy
 		DryRun                        bool
 		Poll, Gap, HTTP, Confirmation time.Duration
 		Cap                           int
 		Include, Exclude, Tags        []string
-	}{c.URL.String(), [3]string{c.Username, c.Password, c.APIKey}, c.Policies, c.DryRun, c.PollInterval, c.MaxObservationGap, c.HTTPTimeout, c.DeleteConfirmationTimeout, c.MaxDeletions, c.IncludeCategories, c.ExcludeCategories, c.ExcludeTags}
+	}{c.URL.String(), [3]string{c.Username, c.Password, c.APIKey}, policies, c.DryRun, c.PollInterval, c.MaxObservationGap, c.HTTPTimeout, c.DeleteConfirmationTimeout, c.MaxDeletions, c.IncludeCategories, c.ExcludeCategories, c.ExcludeTags}
 	b, _ := json.Marshal(v)
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
@@ -204,6 +253,14 @@ func (c Config) Warnings() []Warning {
 	}
 	if c.WebUsername == "" && c.PublicListen() && !c.Once {
 		warnings = append(warnings, Warning{Message: "web UI exposed without authentication"})
+	}
+	for _, tag := range append(slices.Clone(c.ExcludeTags), c.Policies[StoppedArrManaged].MatchTags...) {
+		if reservedTagNearMiss(tag, c.TagSync.Prefix) {
+			warnings = append(warnings, Warning{Message: "tag resembles reserved watchdog prefix but remains an operator tag"})
+		}
+	}
+	if policy, ok := c.Policies[StoppedArrManaged]; ok && len(policy.MatchTags) > 0 && !c.DryRun && c.EffectiveAction(StoppedArrManaged) != Warn {
+		warnings = append(warnings, Warning{Message: "stopping matching tagged torrents can trigger warn/delete and Arr recovery", Policy: StoppedArrManaged})
 	}
 	return warnings
 }
@@ -259,7 +316,7 @@ const usage = `Usage: qbt-watchdog [--config FILE] [--once]
        qbt-watchdog healthcheck [--url URL]
 
 All settings live in the configuration file; see config.example.yaml.
-The file is re-read automatically when it changes.`
+The file is re-read automatically when it or a referenced dependency changes.`
 
 // Parse handles the minimal command line. Per-setting flags and per-setting
 // environment variables intentionally do not exist: an unrecognised flag is an
@@ -352,11 +409,129 @@ func LoadWithEnvironment(path string, process map[string]string) (Config, error)
 	return c, nil
 }
 
+func configDependencyPaths(path string, process map[string]string) ([]string, error) {
+	format, err := FormatFor(path)
+	if err != nil {
+		return nil, err
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return nil, errors.New("cannot resolve configuration location")
+	}
+	dotenv := filepath.Join(filepath.Dir(path), ".env")
+	data, err := readBounded(path, 1024*1024)
+	if err != nil {
+		return nil, err
+	}
+	environment, err := readDotEnv(dotenv)
+	if err != nil {
+		return nil, err
+	}
+	for name, value := range process {
+		environment[name] = value
+	}
+	v := viper.New()
+	v.SetConfigType(string(format))
+	if err := v.ReadConfig(bytes.NewReader(data)); err != nil {
+		return nil, fmt.Errorf("invalid %s syntax", format)
+	}
+	f := defaults()
+	settings, err := json.Marshal(v.AllSettings())
+	if err != nil {
+		return nil, errors.New("invalid configuration values")
+	}
+	settings, err = expandSettings(settings, environment)
+	if err != nil {
+		return nil, err
+	}
+	strict := json.NewDecoder(bytes.NewReader(settings))
+	strict.DisallowUnknownFields()
+	if err = strict.Decode(&f); err != nil {
+		return nil, errors.New("configuration contains unknown fields or incorrect types")
+	}
+	paths := coreDependencyPaths(path)
+	paths = append(paths, f.APIKeyFile, f.PasswordFile, f.WebPasswordFile, f.TLSCAFile)
+	if f.Integrations != nil {
+		if f.Integrations.Sonarr != nil {
+			paths = append(paths, f.Integrations.Sonarr.APIKeyFile)
+		}
+		if f.Integrations.Radarr != nil {
+			paths = append(paths, f.Integrations.Radarr.APIKeyFile)
+		}
+	}
+	return paths, nil
+}
+
 // fileConfig mirrors the file one-to-one. Durations stay strings here so that
 // "30" is rejected instead of silently meaning 30 nanoseconds.
 type filePolicy struct {
-	Action    *Action `json:"action"`
-	Threshold *string `json:"threshold"`
+	Action    *Action           `json:"action"`
+	Threshold *string           `json:"threshold"`
+	ArrMode   *ArrMode          `json:"arr_mode"`
+	MatchTags presentStringList `json:"match_tags"`
+}
+
+type presentStringList struct {
+	Values  []string
+	Present bool
+}
+
+func (l *presentStringList) UnmarshalJSON(data []byte) error {
+	l.Present = true
+	if string(data) == "null" {
+		l.Values = nil
+		return nil
+	}
+	return json.Unmarshal(data, &l.Values)
+}
+
+func markPolicyMatchTagPresence(format Format, data []byte, policies *map[PolicyID]filePolicy) error {
+	if format != YAML {
+		return nil
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("invalid %s syntax", format)
+	}
+	if len(document.Content) == 0 {
+		return nil
+	}
+	policiesNode := mappingValue(document.Content[0], "policies")
+	if policiesNode == nil || policiesNode.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(policiesNode.Content); i += 2 {
+		id := PolicyID(strings.ToLower(policiesNode.Content[i].Value))
+		policyNode := policiesNode.Content[i+1]
+		if mappingValue(policyNode, "match_tags") == nil {
+			continue
+		}
+		if *policies == nil {
+			*policies = map[PolicyID]filePolicy{}
+		}
+		policy := (*policies)[id]
+		policy.MatchTags.Present = true
+		(*policies)[id] = policy
+	}
+	return nil
+}
+
+func mappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if strings.EqualFold(node.Content[i].Value, key) {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+type fileTagSync struct {
+	Enabled          bool   `json:"enabled"`
+	Prefix           string `json:"prefix"`
+	MaxWritesPerPoll int    `json:"max_writes_per_poll"`
 }
 
 type fileConfig struct {
@@ -389,6 +564,7 @@ type fileConfig struct {
 	LogLevel                  string                  `json:"log_level"`
 	LogFormat                 string                  `json:"log_format"`
 	Policies                  map[PolicyID]filePolicy `json:"policies"`
+	TagSync                   fileTagSync             `json:"tag_sync"`
 	Integrations              *fileIntegrations       `json:"integrations"`
 }
 
@@ -402,6 +578,7 @@ func defaults() fileConfig {
 		ExcludeTags: []string{"keep", "qbt-watchdog-ignore"},
 		StateFile:   "/data/state.json", Listen: ":8080",
 		LogLevel: "info", LogFormat: "json",
+		TagSync:      fileTagSync{Prefix: "qbtw-", MaxWritesPerPoll: 20},
 		Integrations: defaultIntegrations(),
 	}
 }
@@ -444,6 +621,9 @@ func DecodeWithEnvironment(format Format, data []byte, environment map[string]st
 	if err = strict.Decode(&f); err != nil {
 		return Config{}, errors.New("configuration contains unknown fields or incorrect types")
 	}
+	if err = markPolicyMatchTagPresence(format, data, &f.Policies); err != nil {
+		return Config{}, err
+	}
 	return build(f)
 }
 
@@ -470,6 +650,7 @@ func build(f fileConfig) (Config, error) {
 		IncludeCategories: normalizeList(f.IncludeCategories),
 		ExcludeCategories: normalizeList(f.ExcludeCategories),
 		ExcludeTags:       normalizeList(f.ExcludeTags),
+		TagSync:           TagSync{Enabled: f.TagSync.Enabled, Prefix: f.TagSync.Prefix, MaxWritesPerPoll: f.TagSync.MaxWritesPerPoll},
 		StateFile:         f.StateFile, Listen: f.Listen, TLSCAFile: f.TLSCAFile,
 		LogLevel: f.LogLevel, LogFormat: f.LogFormat, Policies: policies,
 	}
@@ -560,12 +741,12 @@ func parseDurations(f fileConfig, c *Config) error {
 func parsePolicies(configured map[PolicyID]filePolicy) (map[PolicyID]Policy, error) {
 	for id := range configured {
 		if !id.Valid() {
-			return nil, errors.New("unknown policy; expected metadata, stalled_no_seeders, stalled_seeders_seen or stalled_partial")
+			return nil, errors.New("unknown policy; expected metadata, stalled_no_seeders, stalled_seeders_seen, stalled_partial, completed_no_data or stopped_arr_managed")
 		}
 	}
 	policies := make(map[PolicyID]Policy, len(PolicyIDs()))
 	for _, id := range PolicyIDs() {
-		action, threshold := Warn, "30m"
+		action, threshold, arrMode, matchTags := defaultPolicy(id)
 		p := configured[id]
 		if p.Action != nil {
 			action = *p.Action
@@ -573,16 +754,42 @@ func parsePolicies(configured map[PolicyID]filePolicy) (map[PolicyID]Policy, err
 		if p.Threshold != nil {
 			threshold = *p.Threshold
 		}
+		if p.ArrMode != nil {
+			arrMode = *p.ArrMode
+		}
+		if id != StoppedArrManaged && p.MatchTags.Present {
+			return nil, errors.New("match_tags is only valid for stopped_arr_managed")
+		}
+		if p.MatchTags.Present {
+			matchTags = normalizeList(p.MatchTags.Values)
+		}
+		if id == StoppedArrManaged && len(matchTags) == 0 {
+			return nil, errors.New("stopped_arr_managed requires nonempty match_tags")
+		}
 		if !action.Valid() {
 			return nil, errors.New("policy action must be warn, delete or delete_file")
+		}
+		if !arrMode.ValidForPolicy() {
+			return nil, errors.New("policy arr_mode must be inherit, none, blocklist_and_search or search_only")
 		}
 		duration, err := time.ParseDuration(threshold)
 		if err != nil || duration <= 0 {
 			return nil, errors.New("policy threshold must be a positive duration")
 		}
-		policies[id] = Policy{action, duration}
+		policies[id] = Policy{Action: action, Threshold: duration, ArrMode: arrMode, MatchTags: matchTags}
 	}
 	return policies, nil
+}
+
+func defaultPolicy(id PolicyID) (Action, string, ArrMode, []string) {
+	switch id {
+	case CompletedNoData:
+		return Warn, "2m", InheritArrMode, nil
+	case StoppedArrManaged:
+		return Warn, "10m", InheritArrMode, []string{"Sonarr", "Radarr"}
+	default:
+		return Warn, "30m", InheritArrMode, nil
+	}
 }
 
 // resolveSecrets reads password files on every load, so rotating a mounted
@@ -626,6 +833,22 @@ func resolveSecrets(f fileConfig, c *Config) error {
 }
 
 func validate(c *Config) error {
+	if err := validateTagSync(c.TagSync); err != nil {
+		return err
+	}
+	for _, id := range PolicyIDs() {
+		if _, ok := c.Policies[id]; !ok {
+			return fmt.Errorf("missing default policy %s", id)
+		}
+	}
+	if err := validateReservedTags("exclude_tags", c.ExcludeTags, c.TagSync.Prefix); err != nil {
+		return err
+	}
+	for id, policy := range c.Policies {
+		if err := validateReservedTags("policies."+string(id)+".match_tags", policy.MatchTags, c.TagSync.Prefix); err != nil {
+			return err
+		}
+	}
 	if c.MaxDeletions < 0 || c.MaxDeletions > 10000 {
 		return errors.New("max_actions_per_poll must be between 0 and 10000")
 	}
@@ -657,6 +880,38 @@ func validate(c *Config) error {
 	}
 	c.TLSCAPEM, err = readBounded(c.TLSCAFile, 1024*1024)
 	return err
+}
+
+func validateTagSync(t TagSync) error {
+	if strings.TrimSpace(t.Prefix) == "" {
+		return errors.New("tag_sync.prefix cannot be empty")
+	}
+	if t.Prefix != strings.TrimSpace(t.Prefix) {
+		return errors.New("tag_sync.prefix must not have surrounding whitespace")
+	}
+	if strings.Contains(t.Prefix, ",") {
+		return errors.New("tag_sync.prefix cannot contain commas")
+	}
+	if len(t.Prefix) < 4 {
+		return errors.New("tag_sync.prefix must be at least four characters")
+	}
+	if t.MaxWritesPerPoll <= 0 || t.MaxWritesPerPoll > 10000 {
+		return errors.New("tag_sync.max_writes_per_poll must be between 1 and 10000")
+	}
+	return nil
+}
+
+func validateReservedTags(field string, tags []string, prefix string) error {
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, prefix) {
+			return fmt.Errorf("%s cannot use reserved watchdog tag prefix", field)
+		}
+	}
+	return nil
+}
+
+func reservedTagNearMiss(tag, prefix string) bool {
+	return !strings.HasPrefix(tag, prefix) && strings.HasPrefix(strings.ToLower(tag), strings.ToLower(prefix))
 }
 
 // normalizeList trims surrounding whitespace and drops empties. Comparison

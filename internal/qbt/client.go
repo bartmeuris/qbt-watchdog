@@ -26,6 +26,10 @@ type Torrent struct {
 	State         string  `json:"state"`
 	Progress      float64 `json:"progress"`
 	Downloaded    int64   `json:"downloaded"`
+	Size          int64   `json:"size"`
+	TotalSize     int64   `json:"total_size"`
+	Completed     int64   `json:"completed"`
+	AmountLeft    int64   `json:"amount_left"`
 	DownloadSpeed int64   `json:"dlspeed"`
 	NumSeeds      int     `json:"num_seeds"`
 	NumLeechers   int     `json:"num_leechs"`
@@ -210,6 +214,9 @@ func (c *Client) list(ctx context.Context, query url.Values) ([]Torrent, error) 
 		Torrent
 		Progress   *float64 `json:"progress"`
 		Downloaded *int64   `json:"downloaded"`
+		Size       *int64   `json:"size"`
+		TotalSize  *int64   `json:"total_size"`
+		AmountLeft *int64   `json:"amount_left"`
 		NumSeeds   *int     `json:"num_seeds"`
 	}
 	if err = json.Unmarshal(data, &decoded); err != nil || decoded == nil {
@@ -217,11 +224,14 @@ func (c *Client) list(ctx context.Context, query url.Values) ([]Torrent, error) 
 	}
 	torrents := make([]Torrent, 0, len(decoded))
 	for _, entry := range decoded {
-		if entry.Progress == nil || entry.Downloaded == nil || entry.NumSeeds == nil || *entry.NumSeeds < 0 {
+		if entry.Progress == nil || entry.Downloaded == nil || entry.Size == nil || entry.TotalSize == nil || entry.AmountLeft == nil || entry.NumSeeds == nil || *entry.NumSeeds < 0 {
 			return nil, errors.New("torrent response lacks required safety fields")
 		}
 		entry.Torrent.Progress = *entry.Progress
 		entry.Torrent.Downloaded = *entry.Downloaded
+		entry.Torrent.Size = *entry.Size
+		entry.Torrent.TotalSize = *entry.TotalSize
+		entry.Torrent.AmountLeft = *entry.AmountLeft
 		entry.Torrent.NumSeeds = *entry.NumSeeds
 		torrents = append(torrents, entry.Torrent)
 	}
@@ -229,7 +239,7 @@ func (c *Client) list(ctx context.Context, query url.Values) ([]Torrent, error) 
 	for i := range torrents {
 		t := &torrents[i]
 		t.Hash = strings.ToLower(t.Hash)
-		if !ValidHash(t.Hash) || seen[t.Hash] || t.State == "" || math.IsNaN(t.Progress) || math.IsInf(t.Progress, 0) || t.Progress < 0 || t.Progress > 1 || t.Downloaded < 0 || t.AddedOn > 253402300799 {
+		if !ValidHash(t.Hash) || seen[t.Hash] || t.State == "" || math.IsNaN(t.Progress) || math.IsInf(t.Progress, 0) || t.Progress < 0 || t.Progress > 1 || t.Downloaded < 0 || t.Size < 0 || t.TotalSize < 0 || t.Completed < 0 || t.AmountLeft < 0 || t.Size > t.TotalSize || t.AddedOn > 253402300799 {
 			return nil, errors.New("invalid torrent data")
 		}
 		seen[t.Hash] = true
@@ -258,5 +268,29 @@ func (c *Client) Delete(ctx context.Context, hash string, files bool) error {
 		return errors.New("invalid torrent identifier")
 	}
 	_, err := c.request(ctx, "POST", "torrents/delete", nil, url.Values{"hashes": {hash}, "deleteFiles": {fmt.Sprint(files)}})
+	return err
+}
+
+func (c *Client) AddTags(ctx context.Context, hashes []string, tag string) error {
+	return c.updateTags(ctx, "torrents/addTags", hashes, tag)
+}
+
+func (c *Client) RemoveTags(ctx context.Context, hashes []string, tag string) error {
+	return c.updateTags(ctx, "torrents/removeTags", hashes, tag)
+}
+
+func (c *Client) updateTags(ctx context.Context, path string, hashes []string, tag string) error {
+	if len(hashes) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(tag) == "" || strings.TrimSpace(tag) != tag || strings.Contains(tag, ",") {
+		return errors.New("invalid qBittorrent tag")
+	}
+	for _, hash := range hashes {
+		if !ValidHash(hash) {
+			return errors.New("invalid torrent identifier")
+		}
+	}
+	_, err := c.request(ctx, "POST", path, nil, url.Values{"hashes": {strings.Join(hashes, "|")}, "tags": {tag}})
 	return err
 }

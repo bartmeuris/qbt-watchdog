@@ -12,6 +12,7 @@ type PolicyView struct {
 	Action           config.Action   `json:"action"`
 	EffectiveAction  config.Action   `json:"effective_action"`
 	ThresholdSeconds float64         `json:"threshold_seconds"`
+	MatchTags        []string        `json:"match_tags,omitempty"`
 }
 
 // The decision vocabulary is closed. Every value either states that an action
@@ -25,6 +26,7 @@ const (
 	DecisionProtected         = "protected"
 	DecisionNonzeroProgress   = "nonzero progress"
 	DecisionNonzeroDownloaded = "nonzero downloaded"
+	DecisionPayloadPresent    = "payload present"
 	DecisionDeleteRequested   = "delete requested"
 	DecisionActionsDisabled   = "actions disabled"
 	DecisionWarned            = "warned"
@@ -37,14 +39,48 @@ func Decisions() []string {
 	return []string{
 		DecisionNotApplicable, DecisionTracking, DecisionEligible,
 		DecisionProtected, DecisionNonzeroProgress, DecisionNonzeroDownloaded,
-		DecisionDeleteRequested, DecisionActionsDisabled, DecisionWarned,
-		DecisionRetryLimitReached,
+		DecisionPayloadPresent, DecisionDeleteRequested, DecisionActionsDisabled,
+		DecisionWarned, DecisionRetryLimitReached,
 	}
+}
+
+var completedStates = map[string]bool{
+	"uploading": true,
+	"stalledUP": true,
+	"forcedUP":  true,
+	"queuedUP":  true,
+	// Fully deselected or completed torrents land in qBittorrent's UP state
+	// variants. The DL variants are operator-stopped in-progress downloads.
+	"pausedUP":  true,
+	"stoppedUP": true,
+}
+
+var stoppedStates = map[string]bool{
+	"pausedUP":  true,
+	"stoppedUP": true,
+	"pausedDL":  true,
+	"stoppedDL": true,
+}
+
+func zeroPayload(t qbt.Torrent) bool {
+	return t.Size == 0 && t.TotalSize > 0 && t.Downloaded == 0 && t.AmountLeft == 0
 }
 
 func (s *Service) policy(t qbt.Torrent) config.PolicyID {
 	if t.State == "metaDL" {
 		return config.Metadata
+	}
+	if completedStates[t.State] {
+		if zeroPayload(t) {
+			return config.CompletedNoData
+		}
+		if stoppedStates[t.State] && s.matchesStoppedArrManaged(t) {
+			return config.StoppedArrManaged
+		}
+		return ""
+	}
+	if stoppedStates[t.State] && s.matchesStoppedArrManaged(t) {
+		return config.StoppedArrManaged
 	}
 	if t.State != "stalledDL" || t.Progress >= 1 {
 		return ""
@@ -58,15 +94,36 @@ func (s *Service) policy(t qbt.Torrent) config.PolicyID {
 	return config.StalledNoSeeders
 }
 
+func (s *Service) matchesStoppedArrManaged(t qbt.Torrent) bool {
+	policy, ok := s.c.Policies[config.StoppedArrManaged]
+	if !ok || len(policy.MatchTags) == 0 {
+		return false
+	}
+	for _, tag := range s.operatorTags(t.Tags) {
+		for _, match := range policy.MatchTags {
+			if tag == match {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (s *Service) matchingPolicy(t qbt.Torrent) config.PolicyID {
 	id := s.policy(t)
 	if id == "" || s.protected(t) {
 		return ""
 	}
+	if _, ok := s.c.Policies[id]; !ok {
+		return ""
+	}
 	if id == config.Metadata && t.Progress != 0 {
 		return ""
 	}
-	if id != config.StalledPartial && t.Downloaded != 0 {
+	if id == config.CompletedNoData && !zeroPayload(t) {
+		return ""
+	}
+	if id != config.StalledPartial && id != config.StoppedArrManaged && t.Downloaded != 0 {
 		return ""
 	}
 	return id

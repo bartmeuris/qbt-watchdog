@@ -26,7 +26,9 @@ const POLICY_LABELS = {
   metadata: 'Metadata stall',
   stalled_no_seeders: 'Stalled · no seeders ever seen',
   stalled_seeders_seen: 'Stalled · seeders seen before',
-  stalled_partial: 'Stalled · partly downloaded'
+  stalled_partial: 'Stalled · partly downloaded',
+  completed_no_data: 'Completed · no payload data',
+  stopped_arr_managed: 'Stopped · Arr managed'
 }
 const ACTION_LABELS = {
   warn: 'Warn only',
@@ -62,6 +64,11 @@ const DECISIONS = {
   'nonzero downloaded': [
     'No action · has payload',
     'This policy requires zero downloaded bytes',
+    'blocked'
+  ],
+  'payload present': [
+    'No action · payload present',
+    'The completed-no-data policy requires zero size and zero downloaded bytes',
     'blocked'
   ],
   'delete requested': [
@@ -162,7 +169,7 @@ function render (s) {
             p.threshold_seconds
           )}, configured ${actionLabel(p.action)}, effective ${actionLabel(
             p.effective_action
-          )}`
+          )}${(p.match_tags || []).length ? `, tags ${(p.match_tags || []).join(', ')}` : ''}`
       )
       .join(' · ')
   )
@@ -175,6 +182,7 @@ function render (s) {
   text('last', localTime(s.last_successful_poll))
   text('next', localTime(s.next_poll))
   text('persistence', s.persistence_error || 'Healthy')
+  text('persistence', `${s.persistence_error || 'Healthy'} · tag sync ${s.tag_sync?.enabled ? 'enabled' : 'disabled'} (${s.tag_sync?.prefix || '—'}${s.tag_sync?.dry_run_suppressed ? ', dry-run suppressed' : ''})`)
   text('error', s.poll_error || 'None')
   text('load-warning', s.state_load_warning || 'None')
   text('integrations', (s.integrations || []).map(a => `${a.kind}: ${!a.enabled ? 'disabled' : `${a.queue_fresh ? 'fresh queue' : 'queue unavailable / stale'} · ${a.code || 'waiting'}`}`).join(' · '))
@@ -237,7 +245,7 @@ function render (s) {
       t.policy ? actionLabel(t.configured_action) : '—',
       effectiveNote(t)
     )
-    cell(row, `${(t.progress * 100).toFixed(2)}%`, bytes(t.downloaded))
+    cell(row, `${(t.progress * 100).toFixed(2)}%`, `downloaded ${bytes(t.downloaded)} · size ${bytes(t.size || 0)} / total ${bytes(t.total_size || 0)} · left ${bytes(t.amount_left || 0)} · completed ${bytes(t.completed || 0)}`)
     cell(row, `${bytes(Math.max(0, t.download_speed))}/s`)
     cell(
       row,
@@ -246,7 +254,7 @@ function render (s) {
         ? 'Seed connection observed'
         : 'No seed connection observed'
     )
-    cell(row, t.category || '—', t.tags || 'No tags')
+    cell(row, t.category || '—', `${t.tags || 'No tags'}${(t.watchdog_tags || []).length ? ` · watchdog: ${(t.watchdog_tags || []).join(', ')}` : ''}`)
     cell(row, localTime(t.added_at))
     cell(
       row,

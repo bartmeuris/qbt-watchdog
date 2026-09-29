@@ -69,21 +69,15 @@ func (m *Manager) Reload(next Config, commit func(Config) error) error {
 		m.Record(err)
 		return err
 	}
-	// The watcher re-reads the file periodically to cover dropped events, so
-	// most attempts carry a candidate identical to the running one. commit
-	// still runs, because only the committer knows whether it has drifted,
-	// but an identical candidate must not advance the generation: otherwise
-	// the counter would climb every few seconds and mean nothing.
-	unchanged := reflect.DeepEqual(next, *current)
+	if reflect.DeepEqual(next, *current) {
+		m.Record(nil)
+		return nil
+	}
 	if commit != nil {
 		if err := commit(next.Clone()); err != nil {
 			m.Record(err)
 			return err
 		}
-	}
-	if unchanged {
-		m.Record(nil)
-		return nil
 	}
 	applied := next.Clone()
 	m.current.Store(&applied)

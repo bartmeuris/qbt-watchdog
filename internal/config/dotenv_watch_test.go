@@ -3,6 +3,8 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +24,8 @@ func watchFixture(t *testing.T, path string, process map[string]string) (*Manage
 	outcomes := make(chan error, 64)
 	done := make(chan error, 1)
 	go func() {
-		done <- watch(ctx, path, load, func(c Config) error { return m.Reload(c, nil) }, func(err error) {
+		dependencies := func(path string) ([]string, error) { return configDependencyPaths(path, process) }
+		done <- watchWithDependencies(ctx, path, load, dependencies, func(c Config) error { return m.Reload(c, nil) }, func(err error) {
 			m.Record(err)
 			outcomes <- err
 		})
@@ -54,6 +57,15 @@ func awaitDotEnvOutcome(t *testing.T, outcomes <-chan error, wantError bool, tim
 		}
 	case <-time.After(timeout):
 		t.Fatal("dotenv change was not reconciled")
+	}
+}
+
+func awaitNoDotEnvOutcome(t *testing.T, outcomes <-chan error, timeout time.Duration) {
+	t.Helper()
+	select {
+	case err := <-outcomes:
+		t.Fatal("unexpected dotenv reload outcome", err)
+	case <-time.After(timeout):
 	}
 }
 
@@ -125,7 +137,7 @@ func TestDotEnvWatchProcessSnapshotShadowsRotationAndDeletion(t *testing.T) {
 	}
 }
 
-func TestDotEnvWatchPeriodicReconciliationForExternalSymlinkTarget(t *testing.T) {
+func TestDotEnvWatchExternalSymlinkTargetReplacement(t *testing.T) {
 	t.Parallel()
 	path := writeFile(t, "config.yaml", minimal+"qbt_api_key: '${KEY}'\n")
 	target := writeFile(t, "external.env", "KEY=SECRET_ORIGINAL\n")
@@ -133,14 +145,110 @@ func TestDotEnvWatchPeriodicReconciliationForExternalSymlinkTarget(t *testing.T)
 		t.Fatal(err)
 	}
 	m, outcomes := watchFixture(t, path, nil)
-	// Neither the target nor its directory is watched: only the 5s fallback
-	// can discover this replacement of the external mounted secret.
 	putFixture(t, target+".new", "KEY=SECRET_RECONCILED\n")
 	if err := os.Rename(target+".new", target); err != nil {
 		t.Fatal(err)
 	}
-	awaitDotEnvOutcome(t, outcomes, false, 8*time.Second)
+	awaitDotEnvOutcome(t, outcomes, false, 3*time.Second)
 	if m.Current().APIKey != "SECRET_RECONCILED" || m.Status().Generation != 2 {
-		t.Fatal("periodic reconciliation did not re-read dotenv")
+		t.Fatal("external dotenv target replacement did not re-read dotenv")
+	}
+}
+
+func TestDotEnvWatchDeletionIsOptionalWhenVariablesAreUnused(t *testing.T) {
+	t.Parallel()
+	path := writeFile(t, "config.yaml", minimal)
+	dotenv := filepath.Join(filepath.Dir(path), ".env")
+	putFixture(t, dotenv, "KEY=SECRET_UNUSED\n")
+	m, outcomes := watchFixture(t, path, nil)
+	if err := os.Remove(dotenv); err != nil {
+		t.Fatal(err)
+	}
+	awaitDotEnvOutcome(t, outcomes, false, 3*time.Second)
+	if status := m.Status(); status.Generation != 1 || !status.Healthy() || m.Current().APIKey != "" {
+		t.Fatal("unused dotenv deletion changed the active configuration", status)
+	}
+}
+
+func TestDotEnvWatchIgnoresUnrelatedRenameAndRemove(t *testing.T) {
+	t.Parallel()
+	path := writeFile(t, "config.yaml", minimal+"qbt_api_key: '${KEY}'\n")
+	dir := filepath.Dir(path)
+	putFixture(t, filepath.Join(dir, ".env"), "KEY=SECRET_ORIGINAL\n")
+	_, outcomes := watchFixture(t, path, nil)
+	unrelated := filepath.Join(dir, "unrelated")
+	putFixture(t, unrelated, "ignored\n")
+	if err := os.Rename(unrelated, unrelated+".renamed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(unrelated + ".renamed"); err != nil {
+		t.Fatal(err)
+	}
+	awaitNoDotEnvOutcome(t, outcomes, debounceInterval*3)
+}
+
+func TestWatchTracksInvalidCandidateSecretFileUntilRecovery(t *testing.T) {
+	t.Parallel()
+	path := writeFile(t, "config.yaml", minimal)
+	secret := filepath.Join(filepath.Dir(path), "qbt-api.key")
+	m, outcomes := watchFixture(t, path, nil)
+
+	putFixture(t, path, minimal+fmt.Sprintf("qbt_api_key_file: %q\n", secret))
+	awaitDotEnvOutcome(t, outcomes, true, 3*time.Second)
+	if m.Current().APIKey != "" || m.Status().Generation != 1 || m.Status().Healthy() {
+		t.Fatal("missing candidate secret replaced the active configuration")
+	}
+
+	putFixture(t, secret, "")
+	awaitDotEnvOutcome(t, outcomes, true, 3*time.Second)
+	if m.Current().APIKey != "" || m.Status().Generation != 1 || m.Status().Healthy() {
+		t.Fatal("empty candidate secret replaced the active configuration")
+	}
+
+	putFixture(t, secret, "SECRET_RECOVERED\n")
+	awaitDotEnvOutcome(t, outcomes, false, 3*time.Second)
+	if m.Current().APIKey != "SECRET_RECOVERED" || m.Status().Generation != 2 || !m.Status().Healthy() {
+		t.Fatal("candidate secret fix did not recover without another config event")
+	}
+}
+
+type rollbackWatcher struct {
+	failAt  int
+	adds    int
+	added   []string
+	removed []string
+}
+
+func (w *rollbackWatcher) Add(path string) error {
+	w.adds++
+	if w.adds == w.failAt {
+		return errors.New("add failed")
+	}
+	w.added = append(w.added, path)
+	return nil
+}
+
+func (w *rollbackWatcher) Remove(path string) error {
+	w.removed = append(w.removed, path)
+	return nil
+}
+
+func TestWatchedDependenciesRollsBackPartialAddFailure(t *testing.T) {
+	t.Parallel()
+	watcher := &rollbackWatcher{failAt: 2}
+	tracked := watchedDependencies{watcher: watcher}
+	paths := []string{
+		filepath.Join(t.TempDir(), "first.secret"),
+		filepath.Join(t.TempDir(), "second.secret"),
+	}
+
+	if err := tracked.update(paths); err == nil {
+		t.Fatal("partial watch add failure succeeded")
+	}
+	if len(watcher.added) != 1 || len(watcher.removed) != 1 || watcher.removed[0] != watcher.added[0] {
+		t.Fatal("partial watch add was not rolled back", watcher.added, watcher.removed)
+	}
+	if tracked.directories != nil || tracked.relevantPaths != nil || tracked.projectedDirs != nil {
+		t.Fatal("failed watch update committed dependency state")
 	}
 }

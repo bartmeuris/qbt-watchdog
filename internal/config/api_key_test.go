@@ -102,8 +102,9 @@ func TestCredentialSafetyKey(t *testing.T) {
 }
 
 func TestAPIKeyFileRotationWithoutConfigChange(t *testing.T) {
-	dir := t.TempDir()
-	keyFile, configFile := filepath.Join(dir, "key"), filepath.Join(dir, "config.yaml")
+	configDir := t.TempDir()
+	secretDir := t.TempDir()
+	keyFile, configFile := filepath.Join(secretDir, "key"), filepath.Join(configDir, "config.yaml")
 	if err := os.WriteFile(keyFile, []byte("original-key\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +144,22 @@ func TestAPIKeyFileRotationWithoutConfigChange(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("initial watch load timed out")
 	}
-	replacement := filepath.Join(dir, "replacement")
+	unrelated := filepath.Join(secretDir, "unrelated")
+	if err := os.WriteFile(unrelated, []byte("ignored\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(unrelated, unrelated+".renamed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(unrelated + ".renamed"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-ready:
+		t.Fatal("unrelated secret directory activity triggered reload", err)
+	case <-time.After(debounceInterval * 3):
+	}
+	replacement := filepath.Join(secretDir, "replacement")
 	if err := os.WriteFile(replacement, []byte("rotated-key\n"), 0600); err != nil {
 		t.Fatal(err)
 	}

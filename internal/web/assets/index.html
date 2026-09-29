@@ -46,7 +46,8 @@
             <p id="policies">{{range .Policies}}{{.Policy}}: eligible after {{.ThresholdSeconds}} seconds, configured
                 {{.Action}}, effective {{.EffectiveAction}}. {{end}}</p>
             <p><code>delete</code> preserves payload. <code>delete_file</code> removes payload. The partial-progress
-                policy permits downloaded data; the metadata and zero-progress policies require zero downloaded bytes.
+                policy permits downloaded data; the metadata and zero-progress policies require zero downloaded bytes,
+                while completed-no-data requires qBittorrent to report metadata and zero payload size.
                 All exclusions apply.</p>
         </section>
         <section id="cards" class="cards" aria-label="Torrent summary"></section>
@@ -63,7 +64,7 @@
         <section class="panel">
             <div class="section-heading">
                 <h2>Torrents</h2>
-                <p>Overdue first · exact <code>metaDL</code> and <code>stalledDL</code> states</p>
+                <p>Overdue first · exact metadata and zero-progress policy states</p>
             </div>
             <p class="caveat">&ldquo;Eligible in&rdquo; is the time left before a policy&rsquo;s threshold of continuous
                 observation is met. It is not a countdown to deletion: exclusions, the per-poll action cap, an exhausted

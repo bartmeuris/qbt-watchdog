@@ -19,6 +19,18 @@ func setPartition(c *fakeClient, id config.PolicyID) {
 	if id == config.Metadata {
 		return
 	}
+	if id == config.CompletedNoData {
+		c.torrents[0].State = "uploading"
+		c.torrents[0].TotalSize = 1024
+		return
+	}
+	if id == config.StoppedArrManaged {
+		c.torrents[0].State = "stoppedDL"
+		c.torrents[0].Progress = .25
+		c.torrents[0].Downloaded = 1024
+		c.torrents[0].Tags = "Sonarr"
+		return
+	}
 	c.torrents[0].State = "stalledDL"
 	if id == config.StalledSeedersSeen {
 		c.torrents[0].NumSeeds = 1
@@ -36,7 +48,10 @@ func TestEveryPolicyActionAndDryRun(t *testing.T) {
 				t.Run(string(id)+"/"+string(action)+map[bool]string{true: "/dry", false: "/active"}[dry], func(t *testing.T) {
 					s, c, clock, _ := fixture(t)
 					s.c.DryRun = dry
-					s.c.Policies[id] = config.Policy{Action: action, Threshold: 20 * time.Second}
+					policy := s.c.Policies[id]
+					policy.Action = action
+					policy.Threshold = 20 * time.Second
+					s.c.Policies[id] = policy
 					setPartition(c, id)
 					poll(t, s)
 					clock.Advance(19 * time.Second)
@@ -64,6 +79,77 @@ func TestEveryPolicyActionAndDryRun(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestCompletedNoDataPolicyIsNarrow(t *testing.T) {
+	s, _, _, _ := fixture(t)
+
+	base := qbt.Torrent{Hash: hashA, Name: "completed", State: "uploading", TotalSize: 1024, AmountLeft: 0, Downloaded: 0, Size: 0}
+	if got := s.matchingPolicy(base); got != config.CompletedNoData {
+		t.Fatal("zero-payload completed torrent not classified", got)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*qbt.Torrent)
+	}{
+		{"cross-seed recheck has size", func(t *qbt.Torrent) { t.Size = 1024 }},
+		{"manual partial deselect has size", func(t *qbt.Torrent) { t.Size = 256 }},
+		{"downloaded then deselected has size", func(t *qbt.Torrent) { t.Size, t.Downloaded = 1, 0 }},
+		{"empty torrent has no total", func(t *qbt.Torrent) { t.TotalSize = 0 }},
+		{"missing files state", func(t *qbt.Torrent) { t.State = "missingFiles" }},
+		{"checking up state", func(t *qbt.Torrent) { t.State = "checkingUP" }},
+		{"paused down state", func(t *qbt.Torrent) { t.State = "pausedDL" }},
+		{"stopped down state", func(t *qbt.Torrent) { t.State = "stoppedDL" }},
+		{"known hole downloaded bytes", func(t *qbt.Torrent) { t.State, t.Downloaded = "stalledUP", 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := base
+			tc.mutate(&candidate)
+			if got := s.matchingPolicy(candidate); got != "" {
+				t.Fatal("false positive", got, candidate)
+			}
+		})
+	}
+	for _, state := range []string{"pausedUP", "stoppedUP"} {
+		t.Run(state+" zero payload", func(t *testing.T) {
+			candidate := base
+			candidate.State = state
+			if got := s.matchingPolicy(candidate); got != config.CompletedNoData {
+				t.Fatal("stopped completed no-data not classified", got)
+			}
+		})
+	}
+}
+
+func TestStoppedArrManagedMatchingAndPrecedence(t *testing.T) {
+	s, _, _, _ := fixture(t)
+	s.c.Policies[config.StoppedArrManaged] = config.Policy{Action: config.Warn, Threshold: time.Minute, ArrMode: config.InheritArrMode, MatchTags: []string{"Sonarr"}}
+	partial := qbt.Torrent{Hash: hashA, Name: "stopped", State: "stoppedDL", Progress: .5, Downloaded: 1234, TotalSize: 2048, Size: 1024, Tags: "Sonarr"}
+	if got := s.matchingPolicy(partial); got != config.StoppedArrManaged {
+		t.Fatal("stopped Arr torrent not classified", got)
+	}
+	for _, state := range []string{"pausedUP", "stoppedUP"} {
+		t.Run(state+" payload", func(t *testing.T) {
+			candidate := partial
+			candidate.State = state
+			if got := s.matchingPolicy(candidate); got != config.StoppedArrManaged {
+				t.Fatal("stopped Arr completed-state torrent with payload not classified", got)
+			}
+		})
+	}
+	partial.Tags = "qbtw-Sonarr"
+	if got := s.matchingPolicy(partial); got != "" {
+		t.Fatal("watchdog tag affected classification", got)
+	}
+	partial.Tags = "Other"
+	if got := s.matchingPolicy(partial); got != "" {
+		t.Fatal("unmatched tag classified", got)
+	}
+	emptyTagged := qbt.Torrent{Hash: hashA, Name: "empty", State: "stoppedUP", TotalSize: 1024, AmountLeft: 0, Downloaded: 0, Size: 0, Tags: "Sonarr"}
+	if got := s.matchingPolicy(emptyTagged); got != config.CompletedNoData {
+		t.Fatal("completed_no_data did not take precedence", got)
 	}
 }
 
@@ -124,13 +210,11 @@ func TestPolicyTransitionsGapsAndExclusionsResetFullThreshold(t *testing.T) {
 					c.torrents[0].State = "downloading"
 				}
 				poll(t, s)
-				c.torrents[0].Tags = ""
-				c.torrents[0].Category = "allowed"
-				if id == config.Metadata {
-					c.torrents[0].State = "metaDL"
-				} else {
-					c.torrents[0].State = "stalledDL"
+				setPartition(c, id)
+				if id != config.StoppedArrManaged {
+					c.torrents[0].Tags = ""
 				}
+				c.torrents[0].Category = "allowed"
 				poll(t, s)
 				clock.Advance(19 * time.Second)
 				poll(t, s)
@@ -163,7 +247,7 @@ func TestPolicyTransitionsGapsAndExclusionsResetFullThreshold(t *testing.T) {
 func TestFinalReadRechecksAllPolicyRules(t *testing.T) {
 	for _, id := range config.PolicyIDs() {
 		for _, change := range []string{"state", "progress", "payload", "tag", "category", "include", "seeds", "gap", "missing"} {
-			if change == "seeds" && id != config.StalledNoSeeders || change == "payload" && id == config.StalledPartial {
+			if change == "seeds" && id != config.StalledNoSeeders || change == "payload" && (id == config.StalledPartial || id == config.StoppedArrManaged) || change == "progress" && (id == config.CompletedNoData || id == config.StoppedArrManaged) {
 				continue
 			}
 			t.Run(string(id)+"/"+change, func(t *testing.T) {
@@ -243,6 +327,7 @@ func TestReloadResetsSafetyTimersWithoutResettingRequestBudget(t *testing.T) {
 		t.Run(change, func(t *testing.T) {
 			s, c, clock, disk := fixture(t)
 			s.c.DryRun = false
+			s.manager = config.NewManager(s.c.ConfigFile, s.c)
 			poll(t, s)
 			clock.Advance(20 * time.Second)
 			poll(t, s)

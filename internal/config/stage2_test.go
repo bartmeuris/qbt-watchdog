@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestIdenticalCandidateCommitsWithoutAdvancingTheGeneration(t *testing.T) {
+func TestIdenticalCandidateSkipsCommitWithoutAdvancingTheGeneration(t *testing.T) {
 	m, _ := manager(t, minimal)
 	commits := 0
 	for range 5 {
@@ -13,12 +13,9 @@ func TestIdenticalCandidateCommitsWithoutAdvancingTheGeneration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The committer still sees every attempt, because only it knows whether
-	// its own view has drifted from the file.
-	if commits != 5 {
-		t.Fatal("identical candidate never reached commit", commits)
+	if commits != 0 {
+		t.Fatal("identical candidate reached commit", commits)
 	}
-	// But an unchanged file must not make the generation counter meaningless.
 	if status := m.Status(); status.Generation != 1 || !status.Healthy() || status.LastReloadAt.IsZero() {
 		t.Fatal("unchanged reload advanced the generation", status)
 	}
@@ -32,3 +29,23 @@ func TestIdenticalCandidateCommitsWithoutAdvancingTheGeneration(t *testing.T) {
 		t.Fatal("a real change did not advance the generation", m.Status())
 	}
 }
+
+func TestIdenticalCandidateClearsReloadErrorWithoutCommit(t *testing.T) {
+	m, _ := manager(t, minimal)
+	failure := testingError("reload failed")
+	m.Record(failure)
+	commits := 0
+	if err := m.Reload(m.Current(), func(Config) error { commits++; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if commits != 0 {
+		t.Fatal("unchanged recovery reached commit", commits)
+	}
+	if status := m.Status(); status.Generation != 1 || !status.Healthy() || status.LastReloadAt.IsZero() {
+		t.Fatal("unchanged recovery did not clear reload error", status)
+	}
+}
+
+type testingError string
+
+func (e testingError) Error() string { return string(e) }

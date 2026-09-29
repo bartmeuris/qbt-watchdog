@@ -2,6 +2,7 @@ package watchdog
 
 import (
 	"bytes"
+	"errors"
 	"reflect"
 
 	"qbt-watchdog/internal/config"
@@ -71,6 +72,9 @@ func (s *Service) Apply(c config.Config, prepare func(config.Config) (Client, er
 	c.Once = s.c.Once
 	if err := config.RestartRequiredError(s.c, c); err != nil {
 		return err
+	}
+	if c.TagSync.Enabled && s.state.WatchdogTagPrefix != "" && s.state.WatchdogTagPrefix != c.TagSync.Prefix {
+		return errors.New("tag_sync prefix mismatch; disable tag_sync to remediate before enabling the new prefix")
 	}
 	if reflect.DeepEqual(c, s.c) {
 		return nil

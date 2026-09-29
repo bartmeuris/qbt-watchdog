@@ -174,6 +174,21 @@ func TestRecoveryNoMutationGates(t *testing.T) {
 	}
 }
 
+func TestRecoveryPolicyArrModeNoneCreatesNoJobs(t *testing.T) {
+	s, q, clock, disk, _ := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+	policy := s.c.Policies[config.Metadata]
+	policy.ArrMode = config.NoArrMode
+	s.c.Policies[config.Metadata] = policy
+
+	acceptRecovery(t, s, clock)
+	if len(q.deletes) != 1 {
+		t.Fatal("cleanup did not run")
+	}
+	if len(disk.state.RecoveryJobs) != 0 {
+		t.Fatal("arr_mode none created recovery jobs")
+	}
+}
+
 func TestRecoveryOutageDoesNotBlockCleanupOrReadiness(t *testing.T) {
 	s, q, clock, _, f := recoveryFixture(t, config.Sonarr, config.SearchOnly)
 	f.queueErr = &arr.Error{Outcome: arr.Unreachable}
@@ -245,7 +260,7 @@ func TestRecoverySafetyAndUncertainNeverReplayed(t *testing.T) {
 }
 
 func TestRecoveryReloadPausesAndInvalidates(t *testing.T) {
-	for _, change := range []string{"key", "endpoint", "disabled", "dry_run"} {
+	for _, change := range []string{"key", "endpoint", "disabled", "dry_run", "arr_mode_none"} {
 		t.Run(change, func(t *testing.T) {
 			s, q, clock, _, f := recoveryFixture(t, config.Sonarr, config.SearchOnly)
 			acceptRecovery(t, s, clock)
@@ -262,6 +277,10 @@ func TestRecoveryReloadPausesAndInvalidates(t *testing.T) {
 				c.Integrations.Sonarr.Enabled = false
 			case "dry_run":
 				c.DryRun = true
+			case "arr_mode_none":
+				policy := c.Policies[config.Metadata]
+				policy.ArrMode = config.NoArrMode
+				c.Policies[config.Metadata] = policy
 			}
 			if err := s.Reload(c, func(config.Config) (Client, error) { return q, nil }); err != nil {
 				t.Fatal(err)

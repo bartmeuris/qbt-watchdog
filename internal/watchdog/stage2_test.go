@@ -11,7 +11,7 @@ import (
 )
 
 // stalled returns a torrent already in the stalledDL state, which is the entry
-// condition for three of the four partitions.
+// condition for three of the five partitions.
 func stalled(hash string, progress float64, seeds int) qbt.Torrent {
 	t := torrent(hash)
 	t.State, t.Progress, t.NumSeeds = "stalledDL", progress, seeds

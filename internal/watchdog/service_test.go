@@ -33,16 +33,21 @@ func (c *fakeClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
 type fakeClient struct {
 	torrents                                       []qbt.Torrent
 	listError, versionError, getError, deleteError error
+	tagError                                       error
 	fresh                                          func(string) *qbt.Torrent
 	deletes, gets                                  []string
 	files                                          []bool
+	adds, removes                                  []string
+	versionCalls, listCalls                        int
 	block                                          func(context.Context)
 }
 
 func (f *fakeClient) Versions(context.Context) (string, string, error) {
+	f.versionCalls++
 	return "5.0.1", "2.11.2", f.versionError
 }
 func (f *fakeClient) List(ctx context.Context) ([]qbt.Torrent, error) {
+	f.listCalls++
 	if f.block != nil {
 		f.block(ctx)
 		if ctx.Err() != nil {
@@ -70,6 +75,14 @@ func (f *fakeClient) Delete(_ context.Context, hash string, files bool) error {
 	f.deletes = append(f.deletes, hash)
 	f.files = append(f.files, files)
 	return f.deleteError
+}
+func (f *fakeClient) AddTags(_ context.Context, hashes []string, tag string) error {
+	f.adds = append(f.adds, tag+":"+strings.Join(hashes, "|"))
+	return f.tagError
+}
+func (f *fakeClient) RemoveTags(_ context.Context, hashes []string, tag string) error {
+	f.removes = append(f.removes, tag+":"+strings.Join(hashes, "|"))
+	return f.tagError
 }
 
 type memoryStore struct {
@@ -110,7 +123,10 @@ func fixture(t *testing.T) (*Service, *fakeClient, *fakeClock, *memoryStore) {
 		t.Fatal(err)
 	}
 	for _, id := range config.PolicyIDs() {
-		c.Policies[id] = config.Policy{Action: config.Delete, Threshold: 20 * time.Second}
+		policy := c.Policies[id]
+		policy.Action = config.Delete
+		policy.Threshold = 20 * time.Second
+		c.Policies[id] = policy
 	}
 	clock := &fakeClock{time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)}
 	client := &fakeClient{torrents: []qbt.Torrent{torrent(hashA)}}
@@ -279,7 +295,7 @@ func TestSafetyAndExclusionPrecedence(t *testing.T) {
 		downloaded       int64
 		include, exclude []string
 		eligible         bool
-	}{{name: "zero", eligible: true}, {name: "progress", progress: .01}, {name: "bytes", downloaded: 1}, {name: "include", category: "yes", include: []string{"yes"}, eligible: true}, {name: "outside include", category: "no", include: []string{"yes"}}, {name: "exclude wins", category: "yes", include: []string{"yes"}, exclude: []string{"yes"}}, {name: "tag exact", tags: " keeper ", eligible: true}, {name: "tag trimmed", tags: "misc, keep "}, {name: "tag case sensitive", tags: "Keep", eligible: true}} {
+	}{{name: "zero", eligible: true}, {name: "progress", progress: .01}, {name: "bytes", downloaded: 1}, {name: "include", category: "yes", include: []string{"yes"}, eligible: true}, {name: "outside include", category: "no", include: []string{"yes"}}, {name: "exclude wins", category: "yes", include: []string{"yes"}, exclude: []string{"yes"}}, {name: "tag exact", tags: " keeper ", eligible: true}, {name: "tag trimmed", tags: "misc, keep "}, {name: "reserved tag ignored", tags: "qbtw-keep", eligible: true}, {name: "tag case sensitive", tags: "Keep", eligible: true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, c, clock, _ := fixture(t)
 			s.c.IncludeCategories = tc.include
@@ -564,4 +580,144 @@ func TestBatchPreflightFailurePreventsAllDeletes(t *testing.T) {
 	if s.state.Tracked[hashA].LastSeen.Equal(clock.Now()) {
 		t.Fatal("failed preflight updated observation")
 	}
+}
+
+func TestMissingPolicyDoesNotAct(t *testing.T) {
+	s, c, clock, _ := fixture(t)
+	s.c.DryRun = false
+	delete(s.c.Policies, config.Metadata)
+	poll(t, s)
+	clock.Advance(20 * time.Second)
+	poll(t, s)
+	if len(c.deletes) != 0 || len(s.state.History) != 0 || s.Snapshot().Torrents[0].Decision != DecisionNotApplicable {
+		t.Fatal("missing policy acted", c.deletes, s.state.History, s.Snapshot().Torrents[0].Decision)
+	}
+}
+
+func TestTagSyncDryRunIdempotentAndBenignRaces(t *testing.T) {
+	t.Run("dry-run suppresses writes", func(t *testing.T) {
+		s, c, clock, _ := fixture(t)
+		s.c.TagSync.Enabled = true
+		p := s.c.Policies[config.Metadata]
+		p.Action = config.Warn
+		s.c.Policies[config.Metadata] = p
+		poll(t, s)
+		clock.Advance(20 * time.Second)
+		poll(t, s)
+		if len(c.adds) != 0 || len(c.removes) != 0 || s.state.WatchdogTagPrefix != "" {
+			t.Fatal("dry-run wrote tags", c.adds, c.removes, s.state.WatchdogTagPrefix)
+		}
+	})
+	t.Run("idempotent", func(t *testing.T) {
+		s, c, clock, _ := fixture(t)
+		s.c.DryRun = false
+		s.c.MaxDeletions = 0
+		s.c.TagSync.Enabled = true
+		c.torrents[0].Tags = "qbtw-metadata"
+		poll(t, s)
+		clock.Advance(20 * time.Second)
+		c.torrents[0].Tags = "qbtw-metadata, qbtw-due"
+		poll(t, s)
+		if len(c.adds) != 0 || len(c.removes) != 0 || s.Snapshot().PollError != "" {
+			t.Fatal("idempotent sync wrote tags", c.adds, c.removes, s.Snapshot().PollError)
+		}
+		c.torrents[0].Tags = ""
+		poll(t, s)
+		if len(c.adds) == 0 {
+			t.Fatal("missing desired tags were not written")
+		}
+	})
+	t.Run("delete race is benign", func(t *testing.T) {
+		s, c, _, _ := fixture(t)
+		s.c.DryRun = false
+		s.c.MaxDeletions = 0
+		s.c.TagSync.Enabled = true
+		c.tagError = errors.New("qBittorrent API returned HTTP 404")
+		poll(t, s)
+		if s.Snapshot().PollError != "" {
+			t.Fatal("benign tag race set poll error", s.Snapshot().PollError)
+		}
+	})
+}
+
+func TestTagSyncPrefixMismatchAndRemediation(t *testing.T) {
+	t.Run("reload rejection retains old config", func(t *testing.T) {
+		s, c, _, _ := fixture(t)
+		s.state.WatchdogTagPrefix = "old-"
+		next := s.c.Clone()
+		next.TagSync.Enabled = true
+		next.TagSync.Prefix = "new-"
+		if err := s.Reload(next, func(config.Config) (Client, error) { return c, nil }); err == nil {
+			t.Fatal("mismatched enabled prefix accepted")
+		}
+		if s.Config().TagSync.Prefix == "new-" {
+			t.Fatal("rejected prefix became active")
+		}
+	})
+	t.Run("poll refuses mismatched enabled prefix before qbt calls", func(t *testing.T) {
+		s, c, _, _ := fixture(t)
+		s.c.TagSync.Enabled = true
+		s.c.TagSync.Prefix = "new-"
+		s.state.WatchdogTagPrefix = "old-"
+		if err := s.Poll(context.Background()); err == nil {
+			t.Fatal("mismatched enabled prefix poll succeeded")
+		}
+		if c.versionCalls != 0 || c.listCalls != 0 || len(c.gets) != 0 || len(c.deletes) != 0 || len(c.adds) != 0 || len(c.removes) != 0 {
+			t.Fatal("qBittorrent API called before prefix refusal", c.versionCalls, c.listCalls, c.gets, c.deletes, c.adds, c.removes)
+		}
+	})
+	t.Run("failed claim save prevents tag writes and reverts in memory", func(t *testing.T) {
+		s, c, _, disk := fixture(t)
+		s.c.DryRun = false
+		s.c.MaxDeletions = 0
+		s.c.TagSync.Enabled = true
+		disk.err = errors.New("save failed")
+		poll(t, s)
+		if len(c.adds) != 0 || len(c.removes) != 0 || s.state.WatchdogTagPrefix != "" {
+			t.Fatal("failed claim wrote tags or retained prefix", c.adds, c.removes, s.state.WatchdogTagPrefix)
+		}
+	})
+	t.Run("disabled sweep uses persisted prefix", func(t *testing.T) {
+		s, c, _, _ := fixture(t)
+		s.c.DryRun = false
+		s.c.TagSync.Enabled = false
+		s.c.TagSync.Prefix = "new-"
+		s.state.WatchdogTagPrefix = "old-"
+		c.torrents[0].Tags = "old-metadata"
+		poll(t, s)
+		if len(c.removes) != 1 || !strings.HasPrefix(c.removes[0], "old-metadata:") || s.state.WatchdogTagPrefix != "" {
+			t.Fatal("old prefix not swept", c.removes, s.state.WatchdogTagPrefix)
+		}
+	})
+	t.Run("partial sweep keeps claim", func(t *testing.T) {
+		s, c, _, _ := fixture(t)
+		s.c.DryRun = false
+		s.c.TagSync.Enabled = false
+		s.c.TagSync.MaxWritesPerPoll = 1
+		s.state.WatchdogTagPrefix = "old-"
+		c.torrents[0].Tags = "old-a, old-b"
+		poll(t, s)
+		if len(c.removes) != 1 || s.state.WatchdogTagPrefix != "old-" {
+			t.Fatal("partial sweep lost old prefix", c.removes, s.state.WatchdogTagPrefix)
+		}
+	})
+	t.Run("persisted prefix is not operator protection or match input", func(t *testing.T) {
+		s, _, _, _ := fixture(t)
+		s.c.TagSync.Enabled = false
+		s.c.TagSync.Prefix = "new-"
+		s.state.WatchdogTagPrefix = "old-"
+		s.c.ExcludeTags = []string{"old-ignore"}
+		protected := torrent(hashA)
+		protected.Tags = "old-ignore"
+		if s.protected(protected) {
+			t.Fatal("old watchdog-prefixed exclude tag protected torrent")
+		}
+		policy := s.c.Policies[config.StoppedArrManaged]
+		policy.MatchTags = []string{"old-stopped_arr_managed"}
+		s.c.Policies[config.StoppedArrManaged] = policy
+		stopped := qbt.Torrent{Hash: hashA, Name: "stopped", State: "stoppedDL", Progress: .5, Downloaded: 1, TotalSize: 2, Size: 2, Tags: "old-stopped_arr_managed"}
+		if got := s.matchingPolicy(stopped); got != "" {
+			t.Fatal("old watchdog-prefixed match tag classified torrent", got)
+		}
+	})
 }

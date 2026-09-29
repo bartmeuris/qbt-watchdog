@@ -126,14 +126,14 @@ func TestReauthenticationBoundedAndBypass(t *testing.T) {
 	}
 }
 func TestDecodeUnknownFieldsTargetAndDelete(t *testing.T) {
-	deletes := 0
+	deletes, tagWrites := 0, 0
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v2/torrents/info":
 			if r.URL.RawQuery != "" && r.URL.Query().Get("hashes") != hash {
 				t.Error("wrong target")
 			}
-			io.WriteString(w, `[{"hash":"`+hash+`","name":"test","state":"metaDL","progress":0,"downloaded":0,"dlspeed":1,"num_seeds":2,"num_leechs":3,"added_on":100,"category":"cat","tags":"keep","unknown":{"nested":true},"save_path":"SECRET_PATH"}]`)
+			io.WriteString(w, `[{"hash":"`+hash+`","name":"test","state":"metaDL","progress":0,"downloaded":0,"size":0,"total_size":1,"completed":0,"amount_left":1,"dlspeed":1,"num_seeds":2,"num_leechs":3,"added_on":100,"category":"cat","tags":"keep","unknown":{"nested":true},"save_path":"SECRET_PATH"}]`)
 		case "/api/v2/torrents/delete":
 			deletes++
 			if r.Method != "POST" {
@@ -142,6 +142,12 @@ func TestDecodeUnknownFieldsTargetAndDelete(t *testing.T) {
 			_ = r.ParseForm()
 			if r.Form.Get("hashes") != hash || r.Form.Get("deleteFiles") != "false" {
 				t.Error("unsafe delete form", r.Form)
+			}
+		case "/api/v2/torrents/addTags", "/api/v2/torrents/removeTags":
+			tagWrites++
+			_ = r.ParseForm()
+			if r.Method != "POST" || r.Form.Get("hashes") != hash || r.Form.Get("tags") != "qbtw-metadata" {
+				t.Error("unsafe tag form", r.URL.Path, r.Form)
 			}
 		default:
 			t.Error("unexpected endpoint")
@@ -166,8 +172,20 @@ func TestDecodeUnknownFieldsTargetAndDelete(t *testing.T) {
 	if e = c.Delete(context.Background(), "all", false); e == nil {
 		t.Fatal("accepted all")
 	}
+	if e = c.AddTags(context.Background(), []string{hash}, "qbtw-metadata"); e != nil {
+		t.Fatal(e)
+	}
+	if e = c.RemoveTags(context.Background(), []string{hash}, "qbtw-metadata"); e != nil {
+		t.Fatal(e)
+	}
+	if e = c.AddTags(context.Background(), []string{hash}, "bad,tag"); e == nil {
+		t.Fatal("accepted comma tag")
+	}
 	if deletes != 1 {
 		t.Fatal(deletes)
+	}
+	if tagWrites != 2 {
+		t.Fatal(tagWrites)
 	}
 }
 func TestRedirectDoesNotLeakSecrets(t *testing.T) {
@@ -183,7 +201,8 @@ func TestRedirectDoesNotLeakSecrets(t *testing.T) {
 	}
 }
 func TestInvalidResponsesAndSanitizedErrors(t *testing.T) {
-	for _, body := range []string{"null", "{}", "not json", `[{"hash":"all","state":"metaDL"}]`, `[{"hash":"` + hash + `","state":"metaDL","progress":-1}]`, `[{"hash":"` + hash + `","state":"metaDL","downloaded":-1}]`} {
+	validSafety := `,"progress":0,"downloaded":0,"size":0,"total_size":1,"completed":0,"amount_left":0,"num_seeds":0`
+	for _, body := range []string{"null", "{}", "not json", `[{"hash":"all","state":"metaDL"` + validSafety + `}]`, `[{"hash":"` + hash + `","state":"metaDL","progress":-1,"downloaded":0,"size":0,"total_size":1,"completed":0,"amount_left":0,"num_seeds":0}]`, `[{"hash":"` + hash + `","state":"metaDL","progress":0,"downloaded":-1,"size":0,"total_size":1,"completed":0,"amount_left":0,"num_seeds":0}]`, `[{"hash":"` + hash + `","state":"metaDL","progress":0,"downloaded":0,"size":-1,"total_size":1,"completed":0,"amount_left":0,"num_seeds":0}]`, `[{"hash":"` + hash + `","state":"metaDL","progress":0,"downloaded":0,"size":0,"total_size":-1,"completed":0,"amount_left":0,"num_seeds":0}]`, `[{"hash":"` + hash + `","state":"metaDL","progress":0,"downloaded":0,"size":0,"total_size":1,"completed":0,"amount_left":-1,"num_seeds":0}]`, `[{"hash":"` + hash + `","state":"metaDL","progress":0,"downloaded":0,"size":2,"total_size":1,"completed":0,"amount_left":0,"num_seeds":0}]`, `[{"hash":"` + hash + `","state":"metaDL","progress":0,"downloaded":0,"size":0,"total_size":1,"completed":-1,"amount_left":0,"num_seeds":0}]`} {
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
 		c := client(t, s, false)
 		_, e := c.List(context.Background())
@@ -224,7 +243,7 @@ func TestPrefixRefererAndVersions(t *testing.T) {
 }
 func TestTargetMismatchAndCancellation(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `[{"hash":"ffffffffffffffffffffffffffffffffffffffff","state":"metaDL"}]`)
+		io.WriteString(w, `[{"hash":"ffffffffffffffffffffffffffffffffffffffff","state":"metaDL","progress":0,"downloaded":0,"size":0,"total_size":1,"completed":0,"amount_left":0,"num_seeds":0}]`)
 	}))
 	defer s.Close()
 	c := client(t, s, false)
@@ -239,7 +258,8 @@ func TestTargetMismatchAndCancellation(t *testing.T) {
 }
 
 func TestMissingSafetyFieldsFailClosed(t *testing.T) {
-	for _, fields := range []string{``, `,"progress":0`, `,"downloaded":0`, `,"progress":null,"downloaded":0`, `,"progress":0,"downloaded":null`} {
+	complete := `,"progress":0,"downloaded":0,"size":0,"total_size":1,"amount_left":0,"num_seeds":0`
+	for _, fields := range []string{``, `,"progress":0`, `,"downloaded":0`, `,"progress":0,"downloaded":0,"total_size":1,"amount_left":0,"num_seeds":0`, `,"progress":0,"downloaded":0,"size":0,"amount_left":0,"num_seeds":0`, `,"progress":0,"downloaded":0,"size":0,"total_size":1,"num_seeds":0`, complete + `,"size":null`, complete + `,"total_size":null`, complete + `,"amount_left":null`, `,"progress":null,"downloaded":0,"size":0,"total_size":1,"amount_left":0,"num_seeds":0`, `,"progress":0,"downloaded":null,"size":0,"total_size":1,"amount_left":0,"num_seeds":0`} {
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, `[{"hash":"`+hash+`","state":"metaDL"`+fields+`}]`)
 		}))

@@ -26,6 +26,11 @@ const (
 type ArrMode string
 
 const (
+	// InheritArrMode makes a policy use the service-level integration mode.
+	InheritArrMode ArrMode = "inherit"
+	// NoArrMode disables recovery for a single policy without changing the
+	// integration itself.
+	NoArrMode ArrMode = "none"
 	// BlocklistAndSearch removes the queue item, blocklists the release so
 	// the same one is not grabbed again, and then asks for a replacement.
 	BlocklistAndSearch ArrMode = "blocklist_and_search"
@@ -36,7 +41,13 @@ const (
 
 func ArrModes() []ArrMode { return []ArrMode{BlocklistAndSearch, SearchOnly} }
 
+func PolicyArrModes() []ArrMode {
+	return []ArrMode{InheritArrMode, NoArrMode, BlocklistAndSearch, SearchOnly}
+}
+
 func (m ArrMode) Valid() bool { return slices.Contains(ArrModes(), m) }
+
+func (m ArrMode) ValidForPolicy() bool { return slices.Contains(PolicyArrModes(), m) }
 
 // Blocklists reports whether the release must be blocklisted before a
 // replacement is requested.
@@ -89,7 +100,9 @@ func (s ArrService) endpoint() string {
 	return s.URL.String()
 }
 
-// EndpointKey identifies the instance for durable jobs, independent of key rotation.
+// EndpointKey identifies the instance for durable jobs, independent of key
+// rotation. qBittorrent tag_sync prefix is state ownership, not endpoint
+// identity, and must never be folded into endpoint keys.
 func (s ArrService) EndpointKey() string {
 	h := sha256.Sum256([]byte(string(s.Kind) + "\x00" + s.endpoint()))
 	return hex.EncodeToString(h[:])

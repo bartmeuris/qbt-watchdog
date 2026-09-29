@@ -28,7 +28,7 @@ func TestOnceCycleAndConfigurationFailures(t *testing.T) {
 		case "/api/v2/app/webapiVersion":
 			_, _ = w.Write([]byte("2.11.2"))
 		case "/api/v2/torrents/info":
-			_, _ = w.Write([]byte(`[{"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"test","state":"metaDL","progress":0,"downloaded":0,"num_seeds":0}]`))
+			_, _ = w.Write([]byte(`[{"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"test","state":"metaDL","progress":0,"downloaded":0,"size":0,"total_size":1,"completed":0,"amount_left":0,"num_seeds":0}]`))
 		default:
 			t.Error("unexpected API", r.URL.Path)
 			w.WriteHeader(404)

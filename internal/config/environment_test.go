@@ -61,7 +61,7 @@ func TestEnvironmentDecodeBothFormats(t *testing.T) {
 			if c.Password != environment["PASSWORD"] || c.Username != "user" || c.URL.String() != "https://host/qbt/" || !c.DryRun || c.PollInterval != 11*time.Second {
 				t.Fatal("resolved string changed configuration structure or literal types")
 			}
-			if !reflect.DeepEqual(c.IncludeCategories, []string{environment["CATEGORY"], "literal"}) || c.Policies[Metadata] != (Policy{Delete, 9 * time.Minute}) {
+			if !reflect.DeepEqual(c.IncludeCategories, []string{environment["CATEGORY"], "literal"}) || !reflect.DeepEqual(c.Policies[Metadata], Policy{Action: Delete, Threshold: 9 * time.Minute, ArrMode: InheritArrMode}) {
 				t.Fatal("nested strings or string list did not expand uniformly")
 			}
 			if _, err := Decode(tc.format, []byte(tc.body)); err == nil {

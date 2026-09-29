@@ -92,6 +92,8 @@ func TestIntegrationsValidationMatrix(t *testing.T) {
 	for name, body := range map[string]string{
 		"unknown mode":            enabled(Sonarr, "    mode: delete_everything\n"),
 		"empty mode":              enabled(Sonarr, "    mode: ''\n"),
+		"inherit mode":            enabled(Sonarr, "    mode: inherit\n"),
+		"none mode":               enabled(Sonarr, "    mode: none\n"),
 		"unknown key":             enabled(Sonarr, "    verify_ssl: false\n"),
 		"unknown service":         minimal + "integrations:\n  lidarr:\n    enabled: true\n",
 		"unknown section":         minimal + "integrations:\n  sonarr:\n    enabled: true\n    url: http://a\n    api_key: k\n    extra:\n      a: 1\n",
@@ -324,8 +326,14 @@ func TestArrModeAndKindVocabulary(t *testing.T) {
 	if len(ArrModes()) != 2 || !BlocklistAndSearch.Valid() || !SearchOnly.Valid() {
 		t.Fatal("unexpected mode vocabulary")
 	}
+	if len(PolicyArrModes()) != 4 || !InheritArrMode.ValidForPolicy() || !NoArrMode.ValidForPolicy() || !BlocklistAndSearch.ValidForPolicy() || !SearchOnly.ValidForPolicy() {
+		t.Fatal("unexpected policy mode vocabulary")
+	}
 	if ArrMode("").Valid() || ArrMode("BLOCKLIST_AND_SEARCH").Valid() {
 		t.Fatal("mode matching must be exact")
+	}
+	if InheritArrMode.Valid() || NoArrMode.Valid() {
+		t.Fatal("policy-only modes must not be valid service modes")
 	}
 	if string(Sonarr) != "sonarr" || string(Radarr) != "radarr" {
 		t.Fatal("kind names are part of the configuration surface")
