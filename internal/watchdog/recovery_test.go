@@ -365,3 +365,85 @@ func TestRecoveryBoundedRetryTTLAndRedaction(t *testing.T) {
 		t.Fatal("TTL not enforced")
 	}
 }
+
+func TestRecoveryBlocklistOnlyFinishesWithoutSearch(t *testing.T) {
+	s, q, clock, _, f := recoveryFixture(t, config.Sonarr, config.BlocklistOnly)
+	cycle(s, config.Sonarr)
+	acceptRecovery(t, s, clock)
+	q.torrents = nil
+	poll(t, s)
+	for range 4 {
+		cycle(s, config.Sonarr)
+	}
+	if f.removes != 1 || len(f.searches) != 0 || len(s.state.RecoveryJobs) != 0 {
+		t.Fatalf("blocklist_only must blocklist once and never search: removes=%d searches=%v jobs=%v", f.removes, f.searches, s.Snapshot().RecoveryJobs)
+	}
+	if s.state.History[len(s.state.History)-1].Error != "blocklist_completed" {
+		t.Fatal("blocklist_only must finish with blocklist_completed")
+	}
+}
+
+func TestRecoveryVanishedQueueStillSearchesWhenMediaKnown(t *testing.T) {
+	s, q, clock, _, f := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+	cycle(s, config.Sonarr)
+	acceptRecovery(t, s, clock)
+	f.items = nil
+	q.torrents = nil
+	poll(t, s)
+	for range 4 {
+		cycle(s, config.Sonarr)
+	}
+	if f.removes != 0 || len(f.searches) != 1 {
+		t.Fatalf("vanished queue item with known media must still search: removes=%d searches=%v", f.removes, f.searches)
+	}
+}
+
+func TestRecoveryVanishedQueueDoesNotSearchWhenImported(t *testing.T) {
+	s, q, clock, _, f := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+	cycle(s, config.Sonarr)
+	acceptRecovery(t, s, clock)
+	f.items = nil
+	f.imported = true
+	q.torrents = nil
+	poll(t, s)
+	for range 4 {
+		cycle(s, config.Sonarr)
+	}
+	if f.removes != 0 || len(f.searches) != 0 {
+		t.Fatalf("imported media must not be searched: removes=%d searches=%v", f.removes, f.searches)
+	}
+}
+
+func TestRecoveryEventsCarryTorrentIdentity(t *testing.T) {
+	s, q, clock, _, _ := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+	cycle(s, config.Sonarr)
+	acceptRecovery(t, s, clock)
+	q.torrents = nil
+	poll(t, s)
+	for range 4 {
+		cycle(s, config.Sonarr)
+	}
+	last := s.state.History[len(s.state.History)-1]
+	if last.Error != "search_completed" || last.ShortHash != qbt.ShortHash(hashA) || last.CommandID != 44 {
+		t.Fatalf("recovery event lost torrent identity: %+v", last)
+	}
+}
+
+func TestRecoveryStatusCarriesCorrelation(t *testing.T) {
+	s, q, clock, _, _ := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+	cycle(s, config.Sonarr)
+	acceptRecovery(t, s, clock)
+	q.torrents = nil
+	poll(t, s)
+	for range 3 {
+		cycle(s, config.Sonarr)
+	}
+	jobs := s.Snapshot().RecoveryJobs
+	if len(jobs) != 1 {
+		t.Fatalf("expected one recovery job, got %d", len(jobs))
+	}
+	job := jobs[0]
+	if job.ID == "" || job.ShortHash != qbt.ShortHash(hashA) || job.Policy != config.Metadata || job.CommandID != 44 {
+		t.Fatalf("recovery status lost correlation: %+v", job)
+	}
+}

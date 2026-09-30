@@ -1,0 +1,52 @@
+{{define "policies"}}
+<section id="policies" class="panel" aria-labelledby="policies-title">
+    <div class="section-heading">
+        <h2 id="policies-title">Active policies</h2>
+        <p>Effective configuration · dry run and limits applied</p>
+    </div>
+    <div id="policy-list" data-refresh="/partials/policy-items">
+        {{template "policy-items" .}}
+    </div>
+</section>
+{{end}}
+
+{{define "policy-items"}}
+{{range warningGroups .Snapshot.Warnings}}
+<p class="warning">{{.Message}}{{if .Policies}} <span class="warning-policies">· affects {{policyNames .Policies}}</span>{{end}}</p>
+{{end}}
+<div class="policy-table" role="table" aria-label="Effective policies">
+    <div class="policy-head" role="row" aria-hidden="true">
+        <span role="columnheader">Policy</span>
+        <span role="columnheader">Applies to</span>
+        <span role="columnheader">Wait</span>
+        <span role="columnheader">Effective action</span>
+        <span role="columnheader">Arr behavior</span>
+        <span role="columnheader">Edit</span>
+    </div>
+    {{range policyRows .Snapshot}}
+    <div class="policy-row" role="row" id="policy-{{.ID}}">
+        <div class="policy-cell policy-name" role="cell">
+            <span class="p-name">{{.Label}}</span>
+            <code class="p-id">{{.ID}}</code>
+        </div>
+        <div class="policy-cell policy-applies" role="cell">
+            <span class="p-desc">{{.Description}}</span>
+            {{if .MatchTags}}<span class="p-tags">tags: {{join .MatchTags}}</span>{{end}}
+        </div>
+        <div class="policy-cell policy-wait" role="cell">{{.Threshold}}</div>
+        <div class="policy-cell policy-action" role="cell">
+            <span class="p-effective">{{actionVerb .EffectiveAction}}</span>
+            {{if .DryRunOverride}}<span class="p-configured">configured: {{actionVerb .ConfiguredAction}}</span>{{end}}
+            {{if .BlockedReason}}<span class="p-blocked">{{.BlockedReason}}</span>{{end}}
+        </div>
+        <div class="policy-cell policy-arr" role="cell">
+            <span class="p-arr-summary">{{.ArrSummary}}</span>
+            {{range .ArrDetails}}<span class="p-arr-detail">{{.Service}}: {{.Mode}}{{if .Inherited}} <em>inherited</em>{{end}}</span>{{end}}
+        </div>
+        <div class="policy-cell policy-edit" role="cell">
+            <a href="/settings#policy-{{.ID}}">Edit</a>
+        </div>
+    </div>
+    {{end}}
+</div>
+{{end}}

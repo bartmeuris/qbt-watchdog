@@ -1,0 +1,32 @@
+{{define "settings"}}
+<section id="settings" class="panel status" aria-labelledby="settings-title">
+    <h2 id="settings-title">Settings</h2>
+    <p class="caveat">Effective configuration below. Editing is available at the bottom of this panel.</p>
+    <dl class="facts">
+        <dt>Dry run</dt><dd>{{if .Snapshot.DryRun}}enabled{{else}}disabled{{end}}</dd>
+        <dt>Tag sync</dt><dd>{{if .Snapshot.TagSync.Enabled}}enabled · prefix {{.Snapshot.TagSync.Prefix}}{{else}}disabled{{end}}</dd>
+        <dt>Action cap per poll</dt><dd>{{.Snapshot.Limits.MaxActionsPerPoll}}</dd>
+        <dt>Observation gap</dt><dd>{{duration .Snapshot.Limits.MaxObservationGapSeconds}}</dd>
+        <dt>Delete confirmation timeout</dt><dd>{{duration .Snapshot.Limits.DeleteConfirmationTimeoutSeconds}}</dd>
+        <dt>History limit</dt><dd>{{.Snapshot.Limits.HistoryLimit}}</dd>
+    </dl>
+    {{if .Snapshot.Exclusions.IncludeCategories}}<h3>Include categories</h3><p>{{join .Snapshot.Exclusions.IncludeCategories}}</p>{{end}}
+    {{if .Snapshot.Exclusions.ExcludeCategories}}<h3>Exclude categories</h3><p>{{join .Snapshot.Exclusions.ExcludeCategories}}</p>{{end}}
+    {{if .Snapshot.Exclusions.ExcludeTags}}<h3>Exclude tags</h3><p>{{join .Snapshot.Exclusions.ExcludeTags}}</p>{{end}}
+    <p class="warning">Changing policy, interval, or dry-run settings resets observation timers. <code>listen</code> and <code>state_file</code> require a restart.</p>
+    <div id="settings-editor" hx-get="/partials/settings-editor" hx-trigger="load" hx-swap="innerHTML"></div>
+    <div id="settings-status" role="status" aria-live="polite"></div>
+</section>
+{{end}}
+
+{{define "settings-editor"}}
+<form class="settings-editor" hx-post="/api/v1/config" hx-target="#settings-status" hx-swap="innerHTML">
+    <textarea name="raw" rows="24" spellcheck="false">{{.Raw}}</textarea>
+    <input type="hidden" name="stamp" value="{{.Stamp}}">
+    <button type="submit">Save configuration</button>
+</form>
+{{end}}
+
+{{define "settings-editor-disabled"}}
+<p class="caveat">Settings editing is disabled (no config saver wired).</p>
+{{end}}

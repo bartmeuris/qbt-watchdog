@@ -2,18 +2,23 @@ package web
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"qbt-watchdog/internal/config"
 	"qbt-watchdog/internal/watchdog"
 )
 
+func ptrTime() *time.Time {
+	t := time.Now().UTC()
+	return &t
+}
+
 // handlerOver serves exactly the given rows, so every assertion is made
 // against what an operator's browser receives rather than against a source
-// file. No rows means the empty-table fallback is rendered.
+// file. No rows means the empty-list fallback is rendered.
 func handlerOver(t *testing.T, rows ...watchdog.Row) http.Handler {
 	t.Helper()
 	c, s, m := fixture(t)
@@ -28,14 +33,6 @@ func body(t *testing.T, h http.Handler, path string) string {
 		t.Fatal("not served", path, w.Code)
 	}
 	return w.Body.String()
-}
-
-// definesKey reports whether a JavaScript object literal defines the given
-// key, quoted or bare, so a label table cannot pass by merely mentioning a
-// word somewhere in prose.
-func definesKey(source, name string) bool {
-	return strings.Contains(source, "\n  "+name+":") ||
-		strings.Contains(source, "\n  '"+name+"':")
 }
 
 func TestStatusRowPublishesConfiguredAndEffectiveActionSeparately(t *testing.T) {
@@ -93,40 +90,68 @@ func TestStatusRowPublishesConfiguredAndEffectiveActionSeparately(t *testing.T) 
 	}
 }
 
+// TestInterfaceExplainsEveryClassificationActionAndBlocker re-roots the old
+// app.js label-table guarantee onto the Go label maps. Every machine value the
+// engine can publish must have a friendly label in exactly one place — Go — so
+// no value reaches an operator unexplained.
 func TestInterfaceExplainsEveryClassificationActionAndBlocker(t *testing.T) {
-	js := body(t, handlerOver(t), "/assets/app.js")
+	policyLabels := PolicyLabels()
 	for _, id := range config.PolicyIDs() {
-		if !definesKey(js, string(id)) {
+		if policyLabels[string(id)] == "" {
 			t.Fatal("policy has no friendly label", id)
 		}
 	}
+	if len(policyLabels) != len(config.PolicyIDs()) {
+		t.Fatal("policy label map has stray entries", len(policyLabels), len(config.PolicyIDs()))
+	}
+
+	actionLabels := ActionLabels()
 	for _, action := range config.Actions() {
-		if !definesKey(js, string(action)) {
+		if actionLabels[string(action)] == "" {
 			t.Fatal("action has no friendly label", action)
 		}
 	}
+	if len(actionLabels) != len(config.Actions()) {
+		t.Fatal("action label map has stray entries", len(actionLabels), len(config.Actions()))
+	}
+
+	decisionLabels := watchdog.DecisionLabels()
 	for _, decision := range watchdog.Decisions() {
-		if !definesKey(js, decision) {
+		if decisionLabels[decision] == "" {
 			t.Fatal("decision reaches the operator unexplained", decision)
 		}
 	}
+
+	gateLabels := watchdog.GateLabels()
+	for _, gate := range watchdog.GateNames() {
+		if gateLabels[gate] == "" {
+			t.Fatal("gate reaches the operator unexplained", gate)
+		}
+	}
+
 	// Machine values must survive into the row untranslated, so an operator
 	// can still match a row against the JSON, the logs and the metrics.
-	if !strings.Contains(js, "${t.policy} · ${t.state}") {
+	h := handlerOver(t, watchdog.Row{
+		Name: "example", ShortHash: "aaaaaaaaaaaa", State: "stalledDL",
+		Policy: config.StalledPartial, ConfiguredAction: config.Delete,
+		EffectiveAction: config.Warn, Decision: watchdog.DecisionTracking,
+	})
+	page := body(t, h, "/partials/torrents")
+	if !strings.Contains(page, "stalled_partial · stalledDL") {
 		t.Fatal("machine policy value hidden from the row")
 	}
 	// Both actions appear per row, and the override is named.
-	if !strings.Contains(js, "actionLabel(t.configured_action)") ||
-		!strings.Contains(js, "dry-run override") {
+	if !strings.Contains(page, "Delete torrent, keep files") ||
+		!strings.Contains(page, "dry-run override") {
 		t.Fatal("row does not contrast configured and effective action")
 	}
 }
 
 func TestCountdownReadsAsEligibilityNotAsGuaranteedDeletion(t *testing.T) {
 	h := handlerOver(t)
-	page, js := body(t, h, "/"), body(t, h, "/assets/app.js")
-	if !strings.Contains(page, "Eligible in") {
-		t.Fatal("countdown column not renamed")
+	page := body(t, h, "/partials/torrents")
+	if !strings.Contains(page, "Remove in ~") {
+		t.Fatal("next-action wording missing from caveat")
 	}
 	for _, caveat := range []string{
 		"not a countdown to deletion", "action cap", "retry budget",
@@ -137,13 +162,26 @@ func TestCountdownReadsAsEligibilityNotAsGuaranteedDeletion(t *testing.T) {
 		}
 	}
 	// Overdue stays unmistakably overdue rather than decaying into a timer.
-	if !strings.Contains(js, "overdue`") || !strings.Contains(js, "Threshold already met") {
+	overdue := handlerOver(t, watchdog.Row{
+		Name: "overdue", ShortHash: "aaaaaaaaaaaa", State: "stalledDL",
+		Policy: config.StalledPartial, ConfiguredAction: config.Delete,
+		EffectiveAction: config.Delete, ThresholdSeconds: 60,
+		FirstSeen: ptrTime(), Elapsed: 90, Remaining: -30,
+		Decision: watchdog.DecisionEligible,
+	})
+	overduePage := body(t, overdue, "/partials/torrents")
+	if !strings.Contains(overduePage, "Threshold already met") ||
+		!strings.Contains(overduePage, "overdue") {
 		t.Fatal("overdue rendering lost")
 	}
-	// A row without a proven episode clock shows a dash, never an elapsed
-	// time inferred across an outage.
-	if !strings.Contains(js, "const counting = Boolean(t.first_seen_policy)") ||
-		!strings.Contains(js, "counting ? duration(t.elapsed_seconds) : '—'") {
+	// A row without a proven episode clock reads as observation-interrupted,
+	// never an elapsed time inferred across an outage.
+	unclocked := handlerOver(t, watchdog.Row{
+		Name: "unclocked", ShortHash: "bbbbbbbbbbbb", State: "stalledDL",
+		Policy: config.StalledPartial, ConfiguredAction: config.Delete,
+		EffectiveAction: config.Delete, Decision: watchdog.DecisionTracking,
+	})
+	if !strings.Contains(body(t, unclocked, "/partials/torrents"), "Blocked · observation interrupted") {
 		t.Fatal("timer not gated on a proven episode clock")
 	}
 }
@@ -156,7 +194,7 @@ func TestHostileTorrentValuesStayInertInEveryRenderedSurface(t *testing.T) {
 		ConfiguredAction: config.Delete, EffectiveAction: config.Warn,
 		Decision: watchdog.DecisionTracking,
 	})
-	page := body(t, h, "/")
+	page := body(t, h, "/partials/torrents")
 	if strings.Contains(page, "<img src=x") || strings.Contains(page, "<script>alert") {
 		t.Fatal("hostile value rendered as markup")
 	}
@@ -164,41 +202,55 @@ func TestHostileTorrentValuesStayInertInEveryRenderedSurface(t *testing.T) {
 		t.Fatal("hostile value not escaped into text")
 	}
 
-	// The refreshing view meets hostile values on every poll, so it must only
-	// ever assign text nodes.
+	// The client script only ever assigns text nodes; it never builds markup.
 	js := body(t, h, "/assets/app.js")
 	for _, sink := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("} {
 		if strings.Contains(js, sink) {
-			t.Fatal("markup sink in the refreshing view", sink)
+			t.Fatal("markup sink in the client script", sink)
 		}
 	}
-	if !strings.Contains(js, "td.textContent = value") || !strings.Contains(js, "small.textContent = detail") {
-		t.Fatal("cells no longer built from text nodes")
+	if !strings.Contains(js, "textContent") {
+		t.Fatal("client script no longer assigns text nodes")
 	}
 
 	// Nothing is fetched from elsewhere, so the page stays usable and private
 	// under the strict content security policy it ships with.
+	fullPage := body(t, h, "/")
 	for _, remote := range []string{"https://", "http://", "//cdn", "@import"} {
-		if strings.Contains(page, remote) {
+		if strings.Contains(fullPage, remote) {
 			t.Fatal("remote reference in the page", remote)
 		}
 	}
 }
 
-func TestNoScriptFallbackAndRefreshedTableAgreeOnWidth(t *testing.T) {
-	h := handlerOver(t)
-	page, js := body(t, h, "/"), body(t, h, "/assets/app.js")
-	torrents, _, found := strings.Cut(page, "Recent actions")
-	if !found {
-		t.Fatal("page layout changed")
+// TestServerRenderedPageAndPartialAgreeOnTorrents replaces the old
+// "no-script fallback and refreshed table agree on width" guarantee: there is
+// no second renderer anymore, so the full page and the HTMX partial must both
+// come from the same server-side template and show the same rows. In the
+// multipage shell torrents render only through the shared partial, so the
+// partial is the single surface asserted here.
+func TestServerRenderedPageAndPartialAgreeOnTorrents(t *testing.T) {
+	h := handlerOver(t, watchdog.Row{
+		Name: "example", ShortHash: "aaaaaaaaaaaa", State: "stalledDL",
+		Policy: config.StalledPartial, ConfiguredAction: config.Delete,
+		EffectiveAction: config.Delete, Decision: watchdog.DecisionTracking,
+	})
+	partial := body(t, h, "/partials/torrents")
+	for _, want := range []string{"example", "aaaaaaaaaaaa", "stalled_partial"} {
+		if !strings.Contains(partial, want) {
+			t.Fatal("torrent partial missing torrent", want)
+		}
 	}
-	_, torrents, _ = strings.Cut(torrents, "<h2>Torrents</h2>")
-	columns := strings.Count(torrents, `<th scope="col">`)
-	if columns < 10 {
-		t.Fatal("torrent table lost columns", columns)
+	// The compact redesign uses expandable rows, not a wide table.
+	if strings.Contains(partial, `<th scope="col">`) {
+		t.Fatal("torrent section still renders a wide table")
 	}
-	if !strings.Contains(js, fmt.Sprintf("empty(rows, %d,", columns)) ||
-		!strings.Contains(torrents, fmt.Sprintf(`colspan="%d"`, columns)) {
-		t.Fatal("fallback and refreshed table disagree on width", columns)
+	if !strings.Contains(partial, `<details class="torrent`) {
+		t.Fatal("torrent rows are not expandable details")
+	}
+	// An empty snapshot renders the fallback, not a broken table.
+	empty := body(t, handlerOver(t), "/partials/torrents")
+	if !strings.Contains(empty, "No torrents in the latest snapshot.") {
+		t.Fatal("empty torrent fallback missing")
 	}
 }

@@ -1,0 +1,116 @@
+{{define "torrents"}}
+<section id="torrents" class="panel" aria-labelledby="torrents-title">
+    <div class="section-heading">
+        <h2 id="torrents-title">Torrents</h2>
+        <p>Overdue first · click a row for the evaluation trace and action timeline</p>
+    </div>
+    <p class="caveat">&ldquo;Remove in ~12m&rdquo; is the time left before a policy&rsquo;s threshold of continuous
+        observation is met. It is <em>not a countdown to deletion</em>: the per-poll action cap,
+        exclusions, an exhausted retry budget and a final confirmation read can each still prevent
+        the action. Torrents outside every policy are &ldquo;Not applicable&rdquo; and carry no clock at all.</p>
+    <div class="list-head torrent-head" aria-hidden="true">
+        <span>Torrent</span><span>State</span><span>Policy</span><span>Next action</span>
+    </div>
+    <div class="torrent-list" id="torrent-list" data-refresh="/partials/torrent-rows">
+        {{template "torrent-rows" .}}
+    </div>
+</section>
+{{end}}
+
+{{define "torrent-rows"}}
+{{range .Torrents}}{{template "torrent_row" .}}{{else}}<p class="empty">No torrents in the latest snapshot.</p>{{end}}
+{{end}}
+
+{{define "torrent_row"}}
+<details class="torrent{{if and .Row.FirstSeen (le .Row.Remaining 0.0)}} overdue{{end}}" id="torrent-{{.Row.ShortHash}}" data-torrent="{{.Row.ShortHash}}" data-name="{{.Row.Name}}" data-state="{{.Row.State}}"{{if .Open}} open{{end}}>
+    <summary>
+        <span class="t-torrent">
+            <span class="t-name" title="{{.Row.Name}}">{{.Row.Name}}</span>
+        </span>
+        <span class="t-state"><code>{{.Row.State}}</code></span>
+        <span class="t-policy" title="{{policyDescription .Row.Policy}}">{{policyOrUnclass .Row.Policy}}</span>
+        <span class="t-next{{if and .Row.FirstSeen (le .Row.Remaining 0.0)}} flag-overdue{{end}}" title="Timing depends on continued matching, safety checks, per-poll limits and polling. Not a countdown to deletion.">
+            {{nextActionLabel .Row}}
+            {{if and .Row.FirstSeen (le .Row.Remaining 0.0)}}<small>Threshold already met</small>{{end}}
+        </span>
+    </summary>
+    <div class="detail">
+        <ol class="gate-strip" aria-label="Evaluation gates">
+            {{range gateStrip .Row}}
+            <li class="gate-item gate-{{.Class}}" title="{{.Detail}}">
+                <span class="gate-symbol" aria-hidden="true">{{.Symbol}}</span>
+                <span class="gate-label">{{.Label}}</span>
+                <span class="sr-only">{{.Detail}}</span>
+            </li>
+            {{end}}
+        </ol>
+
+        <p class="decision-sentence">{{decisionSentence .Row}}</p>
+
+        <p class="meta-line">{{pct .Row.Progress}} · {{.Row.NumSeeds}} seeds · {{.Row.NumLeechers}} peers · {{dash .Row.Category}}</p>
+
+        {{if ne .Timeline.Latest "waiting"}}
+        <div class="action-progress">
+            <h4>Action progress</h4>
+            <ol class="progress-strip">
+                {{range .Timeline.Steps}}
+                <li class="progress-step progress-{{.Status}}" title="{{statusLabel .Status}}">
+                    <span class="progress-symbol" aria-hidden="true">{{progressSymbol .Status}}</span>
+                    <span class="progress-label">{{.Label}}</span>
+                </li>
+                {{end}}
+            </ol>
+        </div>
+        {{end}}
+
+        <details class="more-details">
+            <summary>More details</summary>
+            <dl class="facts">
+                <dt>Machine</dt><dd><code>{{if .Row.Policy}}{{.Row.Policy}} · {{end}}{{.Row.State}}</code></dd>
+                <dt>Hash</dt><dd><code>{{.Row.ShortHash}}</code></dd>
+                <dt>Progress</dt><dd>{{pct .Row.Progress}} · downloaded {{bytes .Row.Downloaded}} · size {{bytes .Row.Size}} / {{bytes .Row.TotalSize}}</dd>
+                <dt>Speed</dt><dd>{{bytes .Row.DownloadSpeed}}/s</dd>
+                <dt>Category / tags</dt><dd>{{dash .Row.Category}} · {{if .Row.Tags}}{{.Row.Tags}}{{else}}No tags{{end}}{{if .Row.WatchdogTags}} · watchdog: {{join .Row.WatchdogTags}}{{end}}</dd>
+                <dt>Added</dt><dd>{{timeOrDash .Row.AddedAt}}</dd>
+                <dt>Observed since</dt><dd>{{timeOrDash .Row.FirstSeen}}</dd>
+                <dt>Elapsed</dt><dd>{{if .Row.FirstSeen}}{{duration .Row.Elapsed}}{{else}}—{{end}}</dd>
+                <dt>Threshold</dt><dd>{{if .Row.Policy}}{{duration .Row.ThresholdSeconds}}{{else}}—{{end}}</dd>
+                <dt>Attempts</dt><dd>{{.Row.Attempts}} / {{.Row.MaxAttempts}}{{if .Row.DryRunNotified}} · warning already emitted{{end}}{{if .Row.DeleteRequestedAt}} · delete requested {{timeOrDash .Row.DeleteRequestedAt}}{{end}}</dd>
+            </dl>
+            {{if .Row.PolicyTrace}}
+            <h4>Policy trace</h4>
+            <ul class="trace">
+                {{range .Row.PolicyTrace}}
+                <li><code>{{.Policy}}</code> — {{policyLabel .Policy}} — {{.Reason}}</li>
+                {{end}}
+            </ul>
+            {{end}}
+        </details>
+
+        <details class="manual-actions">
+            <summary>Manual actions</summary>
+            <div class="action-current">
+                {{if .Row.Policy}}Configured {{actionLabel .Row.ConfiguredAction}}{{if ne .Row.ConfiguredAction .Row.EffectiveAction}} → effective {{actionLabel .Row.EffectiveAction}} <em class="override">dry-run override</em>{{end}}{{else}}No policy{{end}}
+            </div>
+            <div class="action-buttons">
+                {{if .Row.Policy}}<button type="button" class="action-btn" hx-post="/api/v1/actions" hx-vals='{"short_hash":"{{.Row.ShortHash}}","action":"{{.Row.ConfiguredAction}}","reason":"run_now"}' hx-target="#action-status-{{.Row.ShortHash}}" hx-swap="innerHTML">Run policy now</button>{{end}}
+                <button type="button" class="action-btn action-btn-danger" hx-post="/api/v1/actions" hx-vals='{"short_hash":"{{.Row.ShortHash}}","action":"delete","reason":"explicit"}' hx-target="#action-status-{{.Row.ShortHash}}" hx-swap="innerHTML">Remove torrent</button>
+                <button type="button" class="action-btn action-btn-danger" hx-post="/api/v1/actions" hx-vals='{"short_hash":"{{.Row.ShortHash}}","action":"delete_file","reason":"explicit"}' hx-target="#action-status-{{.Row.ShortHash}}" hx-swap="innerHTML">Remove torrent and files</button>
+            </div>
+            <div id="action-status-{{.Row.ShortHash}}" data-action-status class="action-status" aria-live="polite"></div>
+        </details>
+    </div>
+</details>
+{{end}}
+
+{{define "timeline"}}
+<h3>Action timeline</h3>
+<ol class="timeline">
+    {{range .Steps}}
+    <li class="step step-{{.Status}}">
+        <span class="step-label">{{.Label}}</span>
+        <span class="step-status">{{statusLabel .Status}}</span>
+    </li>
+    {{end}}
+</ol>
+{{end}}

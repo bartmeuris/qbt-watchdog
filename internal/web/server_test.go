@@ -83,7 +83,8 @@ func TestEscapingStatusAndEmbeddedAssets(t *testing.T) {
 	c, s, m := fixture(t)
 	h := Handler(c, func() watchdog.Snapshot { return *s }, m)
 	html := request(h, "/", "viewer", "SECRET_PASSWORD").Body.String()
-	if strings.Contains(html, s.Torrents[0].Name) || !strings.Contains(html, "&lt;script&gt;") {
+	torrents := request(h, "/partials/torrents", "viewer", "SECRET_PASSWORD").Body.String()
+	if strings.Contains(torrents, s.Torrents[0].Name) || !strings.Contains(torrents, "&lt;script&gt;") {
 		t.Fatal("unescaped hostile name")
 	}
 	w := request(h, "/api/v1/status", "viewer", "SECRET_PASSWORD")

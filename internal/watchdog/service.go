@@ -52,25 +52,37 @@ type Row struct {
 	SeedObserved     bool          `json:"seed_observed"`
 	Name             string        `json:"name"`
 	ShortHash        string        `json:"short_hash"`
-	State            string        `json:"state"`
-	Progress         float64       `json:"progress"`
-	Downloaded       int64         `json:"downloaded"`
-	Size             int64         `json:"size"`
-	TotalSize        int64         `json:"total_size"`
-	Completed        int64         `json:"completed"`
-	AmountLeft       int64         `json:"amount_left"`
-	DownloadSpeed    int64         `json:"download_speed"`
-	NumSeeds         int           `json:"num_seeds"`
-	NumLeechers      int           `json:"num_leechers"`
-	Category         string        `json:"category"`
-	Tags             string        `json:"tags"`
-	WatchdogTags     []string      `json:"watchdog_tags"`
-	DesiredTags      []string      `json:"desired_watchdog_tags"`
-	AddedAt          *time.Time    `json:"added_at"`
-	FirstSeen        *time.Time    `json:"first_seen_policy"`
-	Elapsed          float64       `json:"elapsed_seconds"`
-	Remaining        float64       `json:"remaining_seconds"`
-	Decision         string        `json:"decision"`
+	// Hash is the full info-hash, kept process-internal only (json:"-") so the
+	// status payload never leaks it to API consumers; the UI resolves a manual
+	// action by short hash and force() operates on this full hash.
+	Hash          string     `json:"-"`
+	State         string     `json:"state"`
+	Progress      float64    `json:"progress"`
+	Downloaded    int64      `json:"downloaded"`
+	Size          int64      `json:"size"`
+	TotalSize     int64      `json:"total_size"`
+	Completed     int64      `json:"completed"`
+	AmountLeft    int64      `json:"amount_left"`
+	DownloadSpeed int64      `json:"download_speed"`
+	NumSeeds      int        `json:"num_seeds"`
+	NumLeechers   int        `json:"num_leechers"`
+	Category      string     `json:"category"`
+	Tags          string     `json:"tags"`
+	WatchdogTags  []string   `json:"watchdog_tags"`
+	DesiredTags   []string   `json:"desired_watchdog_tags"`
+	AddedAt       *time.Time `json:"added_at"`
+	FirstSeen     *time.Time `json:"first_seen_policy"`
+	Elapsed       float64    `json:"elapsed_seconds"`
+	Remaining     float64    `json:"remaining_seconds"`
+	Decision      string     `json:"decision"`
+	// Attempt budget and dry-run/delivery state, all additive and cloned so
+	// the payload schema version does not move.
+	Attempts          int               `json:"attempts"`
+	MaxAttempts       int               `json:"max_attempts"`
+	DryRunNotified    bool              `json:"dry_run_notified"`
+	DeleteRequestedAt *time.Time        `json:"delete_requested_at"`
+	PolicyTrace       []PolicyRejection `json:"policy_trace"`
+	Gates             []GateResult      `json:"gates"`
 }
 type Summary struct {
 	Total           int `json:"total"`
@@ -107,6 +119,28 @@ type Snapshot struct {
 	Torrents         []Row               `json:"torrents"`
 	History          []store.Event       `json:"history"`
 	RefreshSeconds   float64             `json:"refresh_seconds"`
+	// Limits and Exclusions mirror the running configuration so a consumer can
+	// explain decisions without reaching into config; Warnings are the loud
+	// safety notices derived from it. All are additive and detached on read.
+	Limits     snapshotLimits   `json:"limits"`
+	Exclusions snapshotLists    `json:"exclusions"`
+	Warnings   []config.Warning `json:"warnings"`
+}
+
+// snapshotLimits carries the capped/duration settings that bound execution.
+type snapshotLimits struct {
+	MaxActionsPerPoll                int     `json:"max_actions_per_poll"`
+	MaxObservationGapSeconds         float64 `json:"max_observation_gap_seconds"`
+	DeleteConfirmationTimeoutSeconds float64 `json:"delete_confirmation_timeout_seconds"`
+	HistoryLimit                     int     `json:"history_limit"`
+}
+
+// snapshotLists carries the exclusion lists, cloned so consumers cannot mutate
+// the running configuration through the payload.
+type snapshotLists struct {
+	IncludeCategories []string `json:"include_categories"`
+	ExcludeCategories []string `json:"exclude_categories"`
+	ExcludeTags       []string `json:"exclude_tags"`
 }
 
 type TagSyncStatus struct {
@@ -145,12 +179,24 @@ type Service struct {
 	// always read from manager.Status.
 	loggedReloadError string
 	writeBlocked      bool
+	trigger           chan struct{}
+	forceMu           sync.Mutex
+	force             map[string]ForceRequest
+}
+
+// ForceRequest records an operator's manual action for one torrent. It is
+// queued and executed by the next Poll, never synchronously.
+type ForceRequest struct {
+	Hash        string        `json:"hash"`
+	Action      config.Action `json:"action"` // warn|delete|delete_file
+	Reason      string        `json:"reason"` // "run_now"|"explicit"
+	RequestedAt time.Time     `json:"requested_at"`
 }
 
 func New(c config.Config, client Client, disk store.Store, clock Clock, log *slog.Logger, metrics *observability.Metrics, build observability.Build) *Service {
 	state, err := disk.Load(clock.Now())
 	endpointChanged := state.EndpointKey != "" && state.EndpointKey != c.EndpointKey()
-	s := &Service{c: c.Clone(), client: client, disk: disk, clock: clock, log: log, metrics: metrics, state: state, manager: config.NewManager(c.ConfigFile, c), reloaded: make(chan struct{}, 1), view: Snapshot{SchemaVersion: store.SchemaVersion, Build: build, DryRun: c.DryRun, RefreshSeconds: c.UIRefreshInterval.Seconds()}}
+	s := &Service{c: c.Clone(), client: client, disk: disk, clock: clock, log: log, metrics: metrics, state: state, manager: config.NewManager(c.ConfigFile, c), reloaded: make(chan struct{}, 1), trigger: make(chan struct{}, 1), force: map[string]ForceRequest{}, view: Snapshot{SchemaVersion: store.SchemaVersion, Build: build, DryRun: c.DryRun, RefreshSeconds: c.UIRefreshInterval.Seconds()}}
 	if s.state.SeedObserved == nil {
 		s.state.SeedObserved = map[string]bool{}
 	}
@@ -194,13 +240,20 @@ func (s *Service) Snapshot() Snapshot {
 	}
 	v.Integrations = slices.Clone(v.Integrations)
 	v.RecoveryJobs = slices.Clone(v.RecoveryJobs)
+	v.Warnings = slices.Clone(v.Warnings)
+	v.Exclusions.IncludeCategories = slices.Clone(v.Exclusions.IncludeCategories)
+	v.Exclusions.ExcludeCategories = slices.Clone(v.Exclusions.ExcludeCategories)
+	v.Exclusions.ExcludeTags = slices.Clone(v.Exclusions.ExcludeTags)
 	v.LastSuccess = cloneTime(v.LastSuccess)
 	v.NextPoll = cloneTime(v.NextPoll)
 	for i := range v.Torrents {
 		v.Torrents[i].FirstSeen = cloneTime(v.Torrents[i].FirstSeen)
 		v.Torrents[i].AddedAt = cloneTime(v.Torrents[i].AddedAt)
+		v.Torrents[i].DeleteRequestedAt = cloneTime(v.Torrents[i].DeleteRequestedAt)
 		v.Torrents[i].WatchdogTags = slices.Clone(v.Torrents[i].WatchdogTags)
 		v.Torrents[i].DesiredTags = slices.Clone(v.Torrents[i].DesiredTags)
+		v.Torrents[i].PolicyTrace = slices.Clone(v.Torrents[i].PolicyTrace)
+		v.Torrents[i].Gates = slices.Clone(v.Torrents[i].Gates)
 	}
 	return v
 }
@@ -213,19 +266,76 @@ func cloneTime(t *time.Time) *time.Time {
 	return &copy
 }
 
+// Force queues a manual action. It only records intent and nudges the run loop;
+// the next Poll executes it through the existing safety pipeline. It returns the
+// current decision for the UI to display, and an error if the request is invalid.
+func (s *Service) Force(hash string, action config.Action, reason string) (string, error) {
+	if !qbt.ValidHash(hash) {
+		return "", fmt.Errorf("invalid torrent hash %q", hash)
+	}
+	if !action.Valid() {
+		return "", fmt.Errorf("invalid action %q", action)
+	}
+	if reason != "run_now" && reason != "explicit" {
+		return "", fmt.Errorf("invalid reason %q: want \"run_now\" or \"explicit\"", reason)
+	}
+	s.forceMu.Lock()
+	defer s.forceMu.Unlock()
+	if s.writeBlocked {
+		return "", errors.New("state persistence unavailable")
+	}
+	if snapshot := s.Snapshot(); snapshot.PersistenceError != "" {
+		return "", errors.New(snapshot.PersistenceError)
+	}
+
+	// A quick read of the live torrent list. It is only mutated under s.mu,
+	// while Force runs outside a Poll, so this is safe concurrent-by-convention.
+	t, ok := s.torrentByHash(hash)
+	if !ok {
+		return "", errors.New("torrent not found")
+	}
+
+	s.force[hash] = ForceRequest{Hash: hash, Action: action, Reason: reason, RequestedAt: s.clock.Now().UTC()}
+	select {
+	case s.trigger <- struct{}{}:
+	default:
+	}
+
+	e := s.state.Tracked[hash]
+	return s.decision(t, e, s.clock.Now()), nil
+}
+
+// torrentByHash returns the torrent with the given full hash, if present in the
+// latest successful list snapshot.
+func (s *Service) torrentByHash(hash string) (qbt.Torrent, bool) {
+	for _, t := range s.torrents {
+		if t.Hash == hash {
+			return t, true
+		}
+	}
+	return qbt.Torrent{}, false
+}
+
 func (s *Service) protected(t qbt.Torrent) bool {
+	return s.protectedReason(t) != ""
+}
+
+// protectedReason returns which exclusion fired, or "" when the torrent is not
+// protected. The reason is a closed ProtectedBy* constant so a trace can name
+// the exact exclusion without inventing a second predicate.
+func (s *Service) protectedReason(t qbt.Torrent) string {
 	if slices.Contains(s.c.ExcludeCategories, t.Category) {
-		return true
+		return ProtectedByCategoryExcluded
 	}
 	if len(s.c.IncludeCategories) > 0 && !slices.Contains(s.c.IncludeCategories, t.Category) {
-		return true
+		return ProtectedByCategoryNotIncluded
 	}
 	for _, tag := range s.operatorTags(t.Tags) {
 		if slices.Contains(s.c.ExcludeTags, tag) {
-			return true
+			return ProtectedByTagExcluded
 		}
 	}
-	return false
+	return ""
 }
 
 func (s *Service) operatorTags(raw string) []string {
@@ -246,52 +356,159 @@ func (s *Service) isWatchdogTag(tag string) bool {
 	return s.state.WatchdogTagPrefix != "" && strings.HasPrefix(tag, s.state.WatchdogTagPrefix)
 }
 
-func (s *Service) decision(t qbt.Torrent, e store.Episode, now time.Time) string {
+// GateResult is one stage of an evaluation, in the order it was walked. Detail
+// is a self-contained human sentence fragment (never a code ID) explaining the
+// check; OK reports whether the torrent passed that gate.
+type GateResult struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+}
+
+// Eval is the full, explainable outcome of evaluating one torrent. Gates carry
+// every check in evaluation order; Decision is the winning decision; and
+// ProtectedBy names the exclusion that fired, if any.
+type Eval struct {
+	Decision    string       `json:"decision"`
+	Gates       []GateResult `json:"gates"`
+	ProtectedBy string       `json:"protected_by,omitempty"`
+}
+
+// evaluate walks exactly the same predicates decision() uses, but records a
+// GateResult for each stage instead of returning at the first terminal answer.
+// The winning decision is set at the point the old code would have returned,
+// so execution can never diverge from the explanation.
+func (s *Service) evaluate(t qbt.Torrent, e store.Episode, now time.Time) Eval {
+	gates := make([]GateResult, 0, len(GateNames()))
+	push := func(name, detail string, ok bool) {
+		gates = append(gates, GateResult{Name: name, Detail: detail, OK: ok})
+	}
+	ev := Eval{}
+
+	// Classification.
 	id := s.policy(t)
-	if id == "" && completedStates[t.State] && t.TotalSize > 0 && !zeroPayload(t) {
-		return DecisionPayloadPresent
-	}
 	if id == "" {
-		return DecisionNotApplicable
+		if completedStates[t.State] && t.TotalSize > 0 && !zeroPayload(t) {
+			push(GatePayloadPresent, "completed state carries downloaded payload", false)
+			ev.Decision = DecisionPayloadPresent
+			ev.Gates = gates
+			return ev
+		}
+		push(GateClassification, "state is outside every policy", false)
+		ev.Decision = DecisionNotApplicable
+		ev.Gates = gates
+		return ev
 	}
+	push(GateClassification, "state matches the \""+string(id)+"\" partition", true)
+
+	// Configured.
 	p, ok := s.c.Policies[id]
 	if !ok {
-		return DecisionNotApplicable
+		push(GateConfigured, "policy is not configured", false)
+		ev.Decision = DecisionNotApplicable
+		ev.Gates = gates
+		return ev
 	}
-	if s.protected(t) {
-		return DecisionProtected
+	push(GateConfigured, "policy is configured", true)
+
+	// Exclusions.
+	if reason := s.protectedReason(t); reason != "" {
+		push(GateExclusions, "excluded: "+reason, false)
+		ev.ProtectedBy = reason
+		ev.Decision = DecisionProtected
+		ev.Gates = gates
+		return ev
 	}
+	push(GateExclusions, "not excluded", true)
+
+	// Field checks.
 	if id == config.Metadata && t.Progress != 0 {
-		return DecisionNonzeroProgress
+		push(GateFieldChecks, "metadata policy requires zero progress", false)
+		ev.Decision = DecisionNonzeroProgress
+		ev.Gates = gates
+		return ev
 	}
 	if id == config.CompletedNoData && !zeroPayload(t) {
-		return DecisionPayloadPresent
+		push(GateFieldChecks, "completed-no-data policy requires zero payload", false)
+		ev.Decision = DecisionPayloadPresent
+		ev.Gates = gates
+		return ev
 	}
 	if id != config.StalledPartial && id != config.StoppedArrManaged && t.Downloaded != 0 {
-		return DecisionNonzeroDownloaded
+		push(GateFieldChecks, "downloaded bytes present but policy requires zero downloaded", false)
+		ev.Decision = DecisionNonzeroDownloaded
+		ev.Gates = gates
+		return ev
 	}
+	push(GateFieldChecks, "field checks passed", true)
+
+	// Pending delete.
 	if e.DeleteRequestedAt != nil {
-		return DecisionDeleteRequested
+		push(GatePendingDelete, "a delete is awaiting confirmation", false)
+		ev.Decision = DecisionDeleteRequested
+		ev.Gates = gates
+		return ev
 	}
+	push(GatePendingDelete, "no delete is pending", true)
+
+	// Continuity.
 	if e.Policy != id || e.FirstSeen.IsZero() || now.Before(e.LastSeen) || now.Sub(e.LastSeen) > s.c.MaxObservationGap {
-		return DecisionTracking
+		push(GateContinuity, "observation is not yet continuous for this episode", false)
+		ev.Decision = DecisionTracking
+		ev.Gates = gates
+		return ev
 	}
+	push(GateContinuity, "observation is continuous", true)
+
+	// Threshold.
 	if now.Sub(e.FirstSeen) < p.Threshold {
-		return DecisionTracking
+		push(GateThreshold, "observed less than the required threshold", false)
+		ev.Decision = DecisionTracking
+		ev.Gates = gates
+		return ev
 	}
+	push(GateThreshold, "threshold elapsed", true)
+
+	// Cap.
 	if s.c.MaxDeletions == 0 {
-		return DecisionActionsDisabled
+		push(GateCap, "per-poll action cap is zero", false)
+		ev.Decision = DecisionActionsDisabled
+		ev.Gates = gates
+		return ev
 	}
+	push(GateCap, "action cap allows deletions", true)
+
+	// Dry run (effective action is Warn).
 	if s.c.EffectiveAction(id) == config.Warn {
 		if e.DryRunNotified {
-			return DecisionWarned
+			push(GateDryRun, "this episode's warning was already emitted", false)
+			ev.Decision = DecisionWarned
+			ev.Gates = gates
+			return ev
 		}
-		return DecisionEligible
+		push(GateDryRun, "warning still to emit this episode", true)
+		ev.Decision = DecisionEligible
+		ev.Gates = gates
+		return ev
 	}
+	push(GateDryRun, "action is destructive, not a warning", true)
+
+	// Attempt budget.
 	if e.Attempts >= store.MaxAttempts {
-		return DecisionRetryLimitReached
+		push(GateAttempts, "attempt budget for this episode is exhausted", false)
+		ev.Decision = DecisionRetryLimitReached
+		ev.Gates = gates
+		return ev
 	}
-	return DecisionEligible
+	push(GateAttempts, "attempt budget remains", true)
+
+	ev.Decision = DecisionEligible
+	ev.Gates = gates
+	return ev
+}
+
+func (s *Service) decision(t qbt.Torrent, e store.Episode, now time.Time) string {
+	return s.evaluate(t, e, now).Decision
 }
 
 func (s *Service) event(action, outcome string, t qbt.Torrent, detail string) {
@@ -469,6 +686,34 @@ func (s *Service) Poll(ctx context.Context) error {
 	if len(candidates) > s.c.MaxDeletions {
 		candidates = candidates[:s.c.MaxDeletions]
 	}
+	// Merge forced manual actions. Snapshot and clear under forceMu; execution
+	// below threads the forced action and reason through the safety pipeline.
+	forced := map[string]ForceRequest{}
+	forcedAction := map[string]config.Action{}
+	forcedReason := map[string]string{}
+	s.forceMu.Lock()
+	for hash, fr := range s.force {
+		forced[hash] = fr
+	}
+	s.force = map[string]ForceRequest{}
+	s.forceMu.Unlock()
+	alreadyCandidate := map[string]bool{}
+	for _, t := range candidates {
+		alreadyCandidate[t.Hash] = true
+	}
+	for hash, fr := range forced {
+		if !alreadyCandidate[hash] {
+			t, found := s.torrentByHash(hash)
+			if found {
+				candidates = append(candidates, t)
+				forcedAction[hash] = fr.Action
+				forcedReason[hash] = fr.Reason
+			}
+		} else {
+			forcedAction[hash] = fr.Action
+			forcedReason[hash] = fr.Reason
+		}
+	}
 	// Negative observations end episodes even when a later read aborts actions.
 	s.endObservedEpisodes(ts)
 	s.torrents = slices.Clone(ts)
@@ -501,17 +746,43 @@ func (s *Service) Poll(ctx context.Context) error {
 	for _, t := range candidates {
 		confirmed := fresh[t.Hash]
 		e, ok := s.state.Tracked[t.Hash]
-		if confirmed == nil || s.matchingPolicy(*confirmed) == "" {
+		// A forced "explicit" action skips the partition check (the operator
+		// named the action unambiguously); every other safety check stays.
+		explicit := forcedReason[t.Hash] == "explicit"
+		if confirmed == nil || (!explicit && s.matchingPolicy(*confirmed) == "") {
 			s.replaceTorrent(t.Hash, confirmed)
 			s.event("action_skipped", "skipped", t, "torrent disappeared or left its policy partition")
 			continue
 		}
 		s.replaceTorrent(t.Hash, confirmed)
+		// A forced "run_now" or "explicit" action accelerates a still-tracking
+		// torrent by rewriting its FirstSeen so the threshold already elapsed,
+		// then leaves the rest of the pipeline untouched. Exclusions, dry-run,
+		// cap, attempts and continuity are all still evaluated by decision()
+		// below. The `!ok` guard stays: an untracked torrent cannot run.
 		if !ok || s.decision(*confirmed, e, s.clock.Now()) != DecisionEligible {
-			s.event("action_skipped", "skipped", t, "fresh safety or continuity check failed")
-			continue
+			if (forcedReason[t.Hash] != "run_now" && forcedReason[t.Hash] != "explicit") || !ok || s.decision(*confirmed, e, s.clock.Now()) != DecisionTracking {
+				s.event("action_skipped", "skipped", t, "fresh safety or continuity check failed")
+				continue
+			}
+			e2 := e
+			e2.FirstSeen = s.clock.Now().Add(-(s.c.Policies[e.Policy].Threshold + time.Second))
+			if s.decision(*confirmed, e2, s.clock.Now()) != DecisionEligible {
+				s.event("action_skipped", "skipped", t, "fresh safety or continuity check failed")
+				continue
+			}
+			// Adopt the accelerated episode so the later re-checks see the same
+			// eligible state instead of still-waiting threshold.
+			e = e2
+			s.state.Tracked[t.Hash] = e
 		}
-		if s.c.EffectiveAction(e.Policy) == config.Warn {
+		// The action the engine takes this iteration: the forced action when one
+		// was explicitly requested, otherwise the config's effective action.
+		effective := s.c.EffectiveAction(e.Policy)
+		if explicit {
+			effective = forcedAction[t.Hash]
+		}
+		if effective == config.Warn {
 			e.DryRunNotified = true
 			s.state.Tracked[t.Hash] = e
 			s.state.Counters.WouldDeletions++
@@ -542,7 +813,7 @@ func (s *Service) Poll(ctx context.Context) error {
 		// Release the known-unsent reservation before retaining negative observations.
 		s.state.Tracked[t.Hash] = e
 		s.observeNegative(t.Hash, confirmed, s.clock.Now())
-		if confirmed == nil || s.matchingPolicy(*confirmed) == "" {
+		if confirmed == nil || (!explicit && s.matchingPolicy(*confirmed) == "") {
 			s.releaseRecovery(t.Hash)
 			s.replaceTorrent(t.Hash, confirmed)
 			s.event("action_skipped", "skipped", t, "torrent disappeared or left its policy partition")
@@ -562,7 +833,7 @@ func (s *Service) Poll(ctx context.Context) error {
 			return err
 		}
 		s.state.Tracked[t.Hash] = reserved
-		if err = s.client.Delete(ctx, t.Hash, s.c.EffectiveAction(e.Policy) == config.DeleteFile); err != nil {
+		if err = s.client.Delete(ctx, t.Hash, effective == config.DeleteFile); err != nil {
 			s.releaseRecovery(t.Hash)
 			s.event("action_failed", "failed", t, "delete request failed")
 			s.fail(err)
@@ -689,21 +960,46 @@ func (s *Service) applyTagWritesBounded(ctx context.Context, addByTag, removeByT
 		if writes >= limit {
 			return false, nil
 		}
-		if err := s.client.RemoveTags(ctx, removeByTag[tag], tag); err != nil && !benignTagRace(err) {
+		if err := s.client.RemoveTags(ctx, removeByTag[tag], tag); err != nil {
+			if benignTagRace(err) {
+				s.auditTagWrite(removeByTag[tag], tag, "action_skipped", "skipped", "tag not found; already absent")
+				writes++
+				continue
+			}
+			s.auditTagWrite(removeByTag[tag], tag, "action_failed", "failed", err.Error())
 			return false, err
 		}
+		s.auditTagWrite(removeByTag[tag], tag, "warn", "success", "tag removed")
 		writes++
 	}
 	for _, tag := range sortedKeys(addByTag) {
 		if writes >= limit {
 			return false, nil
 		}
-		if err := s.client.AddTags(ctx, addByTag[tag], tag); err != nil && !benignTagRace(err) {
+		if err := s.client.AddTags(ctx, addByTag[tag], tag); err != nil {
+			if benignTagRace(err) {
+				s.auditTagWrite(addByTag[tag], tag, "action_skipped", "skipped", "tag not found; already present")
+				writes++
+				continue
+			}
+			s.auditTagWrite(addByTag[tag], tag, "action_failed", "failed", err.Error())
 			return false, err
 		}
+		s.auditTagWrite(addByTag[tag], tag, "warn", "success", "tag added")
 		writes++
 	}
 	return true, nil
+}
+
+// auditTagWrite emits one audit event per torrent for a tag transition. Only
+// actual transitions are recorded: unchanged polls write nothing, so the audit
+// trail names what changed rather than re-asserting every poll. The action and
+// outcome stay inside the existing closed vocabulary; the human detail carries
+// the tag and what happened to it.
+func (s *Service) auditTagWrite(hashes []string, tag, action, outcome, detail string) {
+	for _, hash := range hashes {
+		s.event(action, outcome, qbt.Torrent{Hash: hash}, detail+" ("+tag+")")
+	}
 }
 
 func sortedKeys(m map[string][]string) []string {
@@ -776,7 +1072,7 @@ func (s *Service) publish(next *time.Time) {
 		if !ok {
 			continue
 		}
-		v.Policies = append(v.Policies, PolicyView{Policy: id, Action: p.Action, EffectiveAction: s.c.EffectiveAction(id), ThresholdSeconds: p.Threshold.Seconds(), MatchTags: slices.Clone(p.MatchTags)})
+		v.Policies = append(v.Policies, PolicyView{Policy: id, Action: p.Action, EffectiveAction: s.c.EffectiveAction(id), ThresholdSeconds: p.Threshold.Seconds(), ArrMode: p.ArrMode, MatchTags: slices.Clone(p.MatchTags)})
 	}
 	// Rows read their configured action, effective action and threshold from
 	// the published per-policy model, so the table can never disagree with the
@@ -794,13 +1090,27 @@ func (s *Service) publish(next *time.Time) {
 	if v.History == nil {
 		v.History = []store.Event{}
 	}
+	v.Limits = snapshotLimits{
+		MaxActionsPerPoll:                s.c.MaxDeletions,
+		MaxObservationGapSeconds:         s.c.MaxObservationGap.Seconds(),
+		DeleteConfirmationTimeoutSeconds: s.c.DeleteConfirmationTimeout.Seconds(),
+		HistoryLimit:                     s.c.HistoryLimit,
+	}
+	v.Exclusions = snapshotLists{
+		IncludeCategories: slices.Clone(s.c.IncludeCategories),
+		ExcludeCategories: slices.Clone(s.c.ExcludeCategories),
+		ExcludeTags:       slices.Clone(s.c.ExcludeTags),
+	}
+	v.Warnings = slices.Clone(s.c.Warnings())
 	v.Torrents = make([]Row, 0, len(s.torrents))
 	v.Summary = Summary{Total: len(s.torrents)}
 	for _, t := range s.torrents {
 		e := s.state.Tracked[t.Hash]
-		decision := s.decision(t, e, now)
-		r := Row{Name: t.Name, ShortHash: qbt.ShortHash(t.Hash), State: t.State, Progress: t.Progress, Downloaded: t.Downloaded, Size: t.Size, TotalSize: t.TotalSize, Completed: t.Completed, AmountLeft: t.AmountLeft, DownloadSpeed: t.DownloadSpeed, NumSeeds: t.NumSeeds, NumLeechers: t.NumLeechers, Category: t.Category, Tags: t.Tags, WatchdogTags: s.watchdogTags(t.Tags, s.c.TagSync.Prefix), Decision: decision}
+		ev := s.evaluate(t, e, now)
+		decision := ev.Decision
+		r := Row{Name: t.Name, ShortHash: qbt.ShortHash(t.Hash), Hash: t.Hash, State: t.State, Progress: t.Progress, Downloaded: t.Downloaded, Size: t.Size, TotalSize: t.TotalSize, Completed: t.Completed, AmountLeft: t.AmountLeft, DownloadSpeed: t.DownloadSpeed, NumSeeds: t.NumSeeds, NumLeechers: t.NumLeechers, Category: t.Category, Tags: t.Tags, WatchdogTags: s.watchdogTags(t.Tags, s.c.TagSync.Prefix), Decision: decision, Attempts: e.Attempts, MaxAttempts: store.MaxAttempts, DryRunNotified: e.DryRunNotified, DeleteRequestedAt: cloneTime(e.DeleteRequestedAt), Gates: slices.Clone(ev.Gates)}
 		r.Policy = s.policy(t)
+		_, r.PolicyTrace = s.classify(t)
 		r.DesiredTags = s.desiredWatchdogTags(t, now)
 		r.SeedObserved = s.state.SeedObserved[t.Hash]
 		if p, classified := byPolicy[r.Policy]; classified {
@@ -918,6 +1228,8 @@ func (s *Service) Run(ctx context.Context) {
 			return
 		case <-timer.C:
 		case <-s.reloaded:
+			timer.Stop()
+		case <-s.trigger:
 			timer.Stop()
 		}
 	}

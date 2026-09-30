@@ -34,15 +34,18 @@ const (
 	// BlocklistAndSearch removes the queue item, blocklists the release so
 	// the same one is not grabbed again, and then asks for a replacement.
 	BlocklistAndSearch ArrMode = "blocklist_and_search"
+	// BlocklistOnly removes the queue item and blocklists the release, but
+	// does not ask for a replacement.
+	BlocklistOnly ArrMode = "blocklist_only"
 	// SearchOnly asks for a replacement without blocklisting anything,
 	// which suits operators who curate their own blocklists.
 	SearchOnly ArrMode = "search_only"
 )
 
-func ArrModes() []ArrMode { return []ArrMode{BlocklistAndSearch, SearchOnly} }
+func ArrModes() []ArrMode { return []ArrMode{BlocklistAndSearch, BlocklistOnly, SearchOnly} }
 
 func PolicyArrModes() []ArrMode {
-	return []ArrMode{InheritArrMode, NoArrMode, BlocklistAndSearch, SearchOnly}
+	return []ArrMode{InheritArrMode, NoArrMode, BlocklistAndSearch, BlocklistOnly, SearchOnly}
 }
 
 func (m ArrMode) Valid() bool { return slices.Contains(ArrModes(), m) }
@@ -51,7 +54,10 @@ func (m ArrMode) ValidForPolicy() bool { return slices.Contains(PolicyArrModes()
 
 // Blocklists reports whether the release must be blocklisted before a
 // replacement is requested.
-func (m ArrMode) Blocklists() bool { return m == BlocklistAndSearch }
+func (m ArrMode) Blocklists() bool { return m == BlocklistAndSearch || m == BlocklistOnly }
+
+// Searches reports whether the mode asks for a replacement search.
+func (m ArrMode) Searches() bool { return m == BlocklistAndSearch || m == SearchOnly }
 
 // ArrService is an immutable, fully validated media-manager endpoint. Like
 // Config it is parsed once at the boundary: when Enabled is true the URL is a
@@ -251,7 +257,7 @@ func parseArrService(kind ArrKind, f *fileArr) (ArrService, error) {
 	}
 	field := func(name string) string { return "integrations." + string(kind) + "." + name }
 	if !f.Mode.Valid() {
-		return ArrService{}, fmt.Errorf("%s must be blocklist_and_search or search_only", field("mode"))
+		return ArrService{}, fmt.Errorf("%s must be blocklist_and_search, blocklist_only or search_only", field("mode"))
 	}
 	timeout, err := time.ParseDuration(f.Timeout)
 	if err != nil || timeout <= 0 || timeout > 5*time.Minute {

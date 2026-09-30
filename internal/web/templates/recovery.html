@@ -1,0 +1,49 @@
+{{define "recovery"}}
+<section id="recovery" class="panel" aria-labelledby="recovery-title">
+    <div class="section-heading">
+        <h2 id="recovery-title">Media recovery</h2>
+        <p id="recovery-count">{{len .Recovery}} pending{{if .Snapshot.DryRun}} · mutations paused{{end}}</p>
+    </div>
+    <p class="caveat">Recovery never delays cleanup. Dry-run pauses all recovery mutations. Search completion does
+        not confirm a replacement download. Uncertain requests are not replayed.</p>
+    <div class="list-head" aria-hidden="true">
+        <span>Service / mode</span><span>Stage / outcome</span><span>Captured</span><span>Attempts</span>
+    </div>
+    <div class="recovery-list" id="recovery-list" data-refresh="/partials/recovery-rows">
+        {{template "recovery-rows" .}}
+    </div>
+</section>
+{{end}}
+
+{{define "recovery-rows"}}
+{{range .Recovery}}{{template "recovery_row" .}}{{else}}<p class="empty">No pending recovery jobs.</p>{{end}}
+{{end}}
+
+{{define "recovery_row"}}
+<details class="recovery" id="recovery-{{.Job.ID}}" data-recovery="{{.Job.ID}}">
+    <summary>
+        <span class="t-torrent">
+            <span class="t-name">{{kindLabel .Job.Kind}}</span>
+            <code class="t-hash">{{if .Job.ShortHash}}{{.Job.ShortHash}}{{else}}{{.Job.ID}}{{end}}</code>
+        </span>
+        <span class="t-status">
+            {{stageLabel .Job.Stage}}
+            <code class="t-machine">{{.Job.Stage}}</code>
+        </span>
+        <span class="t-action">{{modeLabel .Job.Mode}}{{if .Job.Code}} · {{.Job.Code}}{{end}}</span>
+        <span class="t-eligibility">{{.Job.Attempts}} attempts</span>
+    </summary>
+    <div class="detail">
+        <dl class="facts">
+            <dt>Stage</dt><dd>{{stageLabel .Job.Stage}} <code>{{.Job.Stage}}</code></dd>
+            <dt>Last code</dt><dd>{{dash .Job.Code}}</dd>
+            <dt>Captured</dt><dd>{{timeHTML .Job.CapturedAt}}</dd>
+            <dt>Expires</dt><dd>{{timeHTML .Job.ExpiresAt}}</dd>
+            <dt>Next check</dt><dd>{{timeHTML .Job.NextAt}}</dd>
+            <dt>Attempts</dt><dd>{{.Job.Attempts}}</dd>
+            <dt>Command ID</dt><dd>{{if .Job.CommandID}}{{.Job.CommandID}}{{else}}—{{end}}</dd>
+        </dl>
+        {{template "timeline" .Timeline}}
+    </div>
+</details>
+{{end}}

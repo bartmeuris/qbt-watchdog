@@ -17,7 +17,7 @@ The daemon must:
 3. Delete torrents that remain in `metaDL` longer than a configurable timeout.
 4. Default to a safe dry-run mode.
 5. Persist its tracking state across short restarts.
-6. Expose a small, read-only web UI showing current torrent and watchdog status.
+6. Expose a small web UI showing current torrent and watchdog status, plus authenticated settings editing and manual actions.
 7. Expose health, readiness, JSON status, and Prometheus metrics endpoints.
 8. Build and run as a small, non-root Docker container using a multi-stage build.
 
@@ -183,7 +183,8 @@ Use the environment prefix `QBTW_`.
 | `--tls-ca-file` | `QBTW_TLS_CA_FILE` | empty | Optional custom CA bundle for qBittorrent HTTPS. |
 | `--tls-insecure-skip-verify` | `QBTW_TLS_INSECURE_SKIP_VERIFY` | `false` | Development escape hatch; warn loudly when enabled. |
 | `--log-level` | `QBTW_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. |
-| `--log-format` | `QBTW_LOG_FORMAT` | `json` | `json` or `text`, using `log/slog`. |
+| `--log-format` | `QBTW_LOG_FORMAT` | `json` | `json`, `text`, or `console`, using `log/slog`. `console` renders one human-readable line per record for terminal output. |
+| `--log-color` | `QBTW_LOG_COLOR` | `auto` | `auto`, `always`, or `never`. `auto` colors only when stderr is a real terminal and `NO_COLOR` is unset. Affects only the `console` format. |
 | `--once` | `QBTW_ONCE` | `false` | Execute one poll/action cycle, persist state, print a summary, and exit; do not start the web server. |
 
 Also support:
@@ -212,7 +213,7 @@ Use Go's standard `html/template`, embedded CSS, and minimal embedded vanilla Ja
 
 ### `GET /`
 
-Provide a clean, responsive, read-only page with:
+Provide a clean, responsive page with:
 
 - Service version and build information.
 - qBittorrent reachability, application version, and Web API version.
@@ -279,6 +280,22 @@ qbt_watchdog_state_write_errors_total
 
 Keep label values bounded enums. Register metrics explicitly rather than through global package state so tests can create isolated registries.
 
+### Settings editor and manual actions
+
+The web surface is not read-only: two authenticated, CSRF-protected mutation endpoints sit behind the same Basic Auth as the dashboard.
+
+#### `GET /api/v1/config` and `POST /api/v1/config`
+
+A settings editor for the configuration document. `GET` returns the raw file text plus an opaque `stamp` (for optimistic concurrency control). `POST` accepts the edited document (JSON or `application/x-www-form-urlencoded`) and, on save, preserves the operator's YAML comments and formatting. Concurrent edits are detected via the stamp: a `409` is returned on conflict rather than silently overwriting a newer edit. A save that yields an invalid configuration is rejected (`422`) and the previously running configuration stays in force; the resulting reload health is reported in the response. Both routes require authentication, and `POST` additionally requires the same-origin CSRF check.
+
+#### `POST /api/v1/actions`
+
+Queues a manual action for one torrent: `run_now` (accelerate a still-tracking torrent through its threshold) or `explicit` removal. The client names the torrent only by `short_hash`; the full hash is resolved server-side from the latest snapshot and never accepted from the request. The endpoint does not delete anything itself — it records the intent and returns `202` with the current decision; the next `Poll` executes the action through the existing safety pipeline (exclusions, dry-run, cap, attempts, continuity). Requires authentication plus the same-origin CSRF check.
+
+#### HTMX server-rendered UI
+
+The dashboard is rendered server-side with Go templates and a vendored copy of htmx (no CDN, no frontend build step); partials refresh individual sections without reloading the page, and light/dark themes follow the browser preference.
+
 ### HTTP hardening
 
 - Set `Content-Type` explicitly.
@@ -286,8 +303,8 @@ Keep label values bounded enums. Register metrics explicitly rather than through
 - Configure server read-header, read, write, and idle timeouts.
 - Bound request header sizes.
 - Use constant-time comparison for optional Basic Auth credentials.
-- Protect `/` and `/api/v1/status` when web credentials are configured. Health endpoints remain unauthenticated. `/metrics` follows `metrics-public`.
-- The web surface is read-only: add no delete buttons or other mutation endpoints.
+- Protect `/`, `/api/v1/status`, `/api/v1/config`, and `/api/v1/actions` when web credentials are configured. Health endpoints remain unauthenticated. `/metrics` follows `metrics-public`.
+- Manual actions (`POST /api/v1/actions`) and settings edits (`POST /api/v1/config`) are the only mutation surfaces, and both require authentication plus a same-origin CSRF check; they never accept a full torrent hash.
 - Escape all torrent-controlled text and never construct HTML with `innerHTML` from API values.
 
 ## Persistence format
@@ -482,7 +499,7 @@ The implementation is complete only when all of the following are true:
 - Watchdog state survives normal container restarts through `/data/state.json`.
 - qBittorrent outages degrade status without crashing or deleting anything.
 - The UI shows all torrents and clearly explains each watchdog decision.
-- The UI has no mutation controls and safely escapes torrent-controlled content.
+- The UI shows all torrents, safely escapes torrent-controlled content, and exposes settings editing and manual actions only behind authentication and CSRF protection.
 - The service exposes functional liveness, readiness, versioned status JSON, and bounded-cardinality Prometheus metrics.
 - Credentials and sensitive qBittorrent fields never appear in logs, state, UI, status JSON, or metrics.
 - The final image is multi-stage, static, non-root, has no shell/runtime package manager, and starts successfully.
@@ -495,7 +512,6 @@ The implementation is complete only when all of the following are true:
 - Replacing qBittorrent or implementing BitTorrent behavior.
 - Managing normal stalled downloads or completed torrents.
 - A general torrent-management UI.
-- UI mutation controls.
 - Sonarr/Radarr/Prowlarr blocklisting or failure notification in the first version.
 - Multiple qBittorrent instances in one process.
 - Kubernetes manifests, Helm charts, or cloud deployment.

@@ -38,6 +38,20 @@ func TestEventTextBounds(t *testing.T) {
 	}
 }
 
+func TestEventCommandIDRoundTrips(t *testing.T) {
+	now := time.Now().UTC()
+	s := Empty()
+	s.History = []Event{{Time: now, Action: "recovery", Outcome: "success", CommandID: 44, ShortHash: "aaaaaaaaaaaa", Error: "search_completed"}}
+	f := write(t, s)
+	loaded, err := f.Load(now)
+	if err != nil || len(loaded.History) != 1 {
+		t.Fatalf("event with command_id rejected: %v %v", err, loaded.History)
+	}
+	if loaded.History[0].CommandID != 44 {
+		t.Fatal("command_id not preserved")
+	}
+}
+
 func TestLoadedHistoryNormalizesHostileText(t *testing.T) {
 	now := time.Now().UTC()
 	s := Empty()

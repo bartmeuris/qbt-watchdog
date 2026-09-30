@@ -173,6 +173,7 @@ tag_sync:
 #     inherit               use the matching integration's mode (default)
 #     none                  do no Sonarr/Radarr recovery for this policy
 #     blocklist_and_search  override the integration mode for this policy
+#     blocklist_only        override the integration mode for this policy
 #     search_only           override the integration mode for this policy
 #
 # dry_run overrides every action to "warn", so a destructive action needs both
@@ -272,6 +273,9 @@ exclude_tags: ["keep", "qbt-watchdog-ignore"]
 #   blocklist_and_search  remove the Arr queue item with blocklist=true,
 #                         removeFromClient=false and skipRedownload=true, then
 #                         issue a targeted EpisodeSearch or MoviesSearch.
+#   blocklist_only        remove the Arr queue item with blocklist=true,
+#                         removeFromClient=false and skipRedownload=true,
+#                         without asking for a replacement.
 #   search_only           issue only the targeted search, without blocklisting.
 
 integrations:
@@ -350,5 +354,12 @@ tls_insecure_skip_verify: false
 # debug, info, warn or error. Applied live.
 log_level: "info"
 
-# json or text. Applied live.
+# json, text or console. Applied live. The default is "json"; choose "console"
+# for human-readable terminal output (one line per record, colored level when
+# log_color allows it).
 log_format: "json"
+
+# auto, always or never. Applied live. "auto" colors only when stderr is a
+# real terminal and NO_COLOR is unset; "always" forces color; "never" disables
+# it. Ignored for json and text formats.
+log_color: "auto"

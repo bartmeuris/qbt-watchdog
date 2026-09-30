@@ -1,313 +1,347 @@
 'use strict'
-const byId = id => document.getElementById(id)
-const text = (id, value) => {
-  byId(id).textContent = value
-}
-const localTime = value => (value ? new Date(value).toLocaleString() : '—')
-const duration = value => {
-  const n = Math.round(Math.abs(value))
-  return n < 60
-    ? `${n}s`
-    : n < 3600
-    ? `${Math.floor(n / 60)}m ${n % 60}s`
-    : `${Math.floor(n / 3600)}h ${Math.floor((n % 3600) / 60)}m`
-}
-const bytes = value => {
-  if (value < 1024) return `${value} B`
-  const unit = Math.min(Math.floor(Math.log(value) / Math.log(1024)), 4)
-  return `${(value / 1024 ** unit).toFixed(1)} ${
-    ['B', 'KiB', 'MiB', 'GiB', 'TiB'][unit]
-  }`
-}
-// Friendly wording lives only here. Machine values keep their exact spelling
-// in /api/v1/status, in the metrics and in the persisted state, so nothing
-// downstream depends on how this page reads.
-const POLICY_LABELS = {
-  metadata: 'Metadata stall',
-  stalled_no_seeders: 'Stalled · no seeders ever seen',
-  stalled_seeders_seen: 'Stalled · seeders seen before',
-  stalled_partial: 'Stalled · partly downloaded',
-  completed_no_data: 'Completed · no payload data',
-  stopped_arr_managed: 'Stopped · Arr managed'
-}
-const ACTION_LABELS = {
-  warn: 'Warn only',
-  delete: 'Delete torrent, keep files',
-  delete_file: 'Delete torrent and files'
-}
-// Each decision the engine can publish, as a headline plus the reason an
-// action is or is not possible right now. "blocked" greys the row's status.
-const DECISIONS = {
-  eligible: [
-    'Eligible now',
-    'The action cap, exclusions and a final re-read still apply'
-  ],
-  tracking: [
-    'Counting down',
-    'Waiting for continuous observation to reach the threshold'
-  ],
-  'not applicable': [
-    'Not applicable',
-    'Outside every policy, so no clock and no action',
-    'blocked'
-  ],
-  protected: [
-    'No action · protected',
-    'Excluded by category or tag',
-    'blocked'
-  ],
-  'nonzero progress': [
-    'No action · has progress',
-    'The metadata policy requires zero progress',
-    'blocked'
-  ],
-  'nonzero downloaded': [
-    'No action · has payload',
-    'This policy requires zero downloaded bytes',
-    'blocked'
-  ],
-  'payload present': [
-    'No action · payload present',
-    'The completed-no-data policy requires zero size and zero downloaded bytes',
-    'blocked'
-  ],
-  'delete requested': [
-    'No action · delete pending',
-    'A delete was requested and is awaiting confirmation',
-    'blocked'
-  ],
-  'actions disabled': [
-    'No action · actions disabled',
-    'The per-poll action cap is zero',
-    'blocked'
-  ],
-  warned: [
-    'No action · already warned',
-    'This episode has already produced its one warning',
-    'blocked'
-  ],
-  'retry limit reached': [
-    'No action · retry limit reached',
-    'The attempt budget for this episode is exhausted',
-    'blocked'
-  ]
-}
-// Lookups are total: an unknown value falls back to something truthful rather
-// than reaching an inherited object property.
-const look = (table, value, fallback) =>
-  Object.hasOwn(table, value) ? table[value] : fallback
-const policyLabel = id => look(POLICY_LABELS, id, 'Not applicable')
-const actionLabel = action => look(ACTION_LABELS, action, '—')
-const decisionOf = decision =>
-  look(DECISIONS, decision, [decision || 'Unknown', '', 'blocked'])
-// What the engine would actually do, and whether that differs from what the
-// operator configured. A difference is always a dry-run downgrade.
-const effectiveNote = t => {
-  if (!t.policy) return 'No policy, so no action'
-  const effective = `Effective now: ${actionLabel(t.effective_action)}`
-  if (t.configured_action === t.effective_action) return effective
-  return `${effective} (dry-run override)`
-}
-// Time left before the policy threshold is met. Only a torrent with a proven,
-// uninterrupted episode has one at all; the rest keep a dash.
-const eligibility = t => {
-  if (!t.first_seen_policy) return ['—', 'No episode clock']
-  if (t.remaining_seconds > 0)
-    return [duration(t.remaining_seconds), 'Until the threshold is met']
-  return [`${duration(t.remaining_seconds)} overdue`, 'Threshold already met']
-}
-function cell (row, value, detail, className) {
-  const td = document.createElement('td')
-  td.textContent = value
-  if (className) td.className = className
-  if (detail !== undefined) {
-    const small = document.createElement('small')
-    small.textContent = detail
-    td.append(small)
+// Client behaviour is deliberately tiny. All markup is server-rendered; HTMX
+// swaps fragments, and this script only (1) turns UTC instants into local
+// times, (2) toggles the light/dark theme, (3) drives ONE shared refresh
+// coordinator, and (4) reflects manual-action / settings feedback. It never
+// builds markup, so hostile values stay inert: every visible string is
+// assigned through textContent.
+;(function () {
+  // Harden HTMX: no expression evaluation of any kind.
+  if (window.htmx) {
+    window.htmx.config.allowEval = false
   }
-  row.append(td)
-}
-function empty (body, columns, message) {
-  if (body.childElementCount) return
-  const tr = document.createElement('tr'),
-    td = document.createElement('td')
-  td.colSpan = columns
-  td.textContent = message
-  tr.append(td)
-  body.append(tr)
-}
-function render (s) {
-  text(
-    'build',
-    `${s.build.version} · ${s.build.revision} · ${s.build.go_version} · ${s.build.build_date}`
-  )
-  const destructive = s.policies.some(p => p.effective_action !== 'warn')
-  text(
-    'mode',
-    s.dry_run
-      ? 'DRY RUN — every policy downgraded to warn'
-      : destructive
-      ? 'ACTIVE — destructive policies enabled'
-      : 'WARN ONLY — no deletions'
-  )
-  byId('mode').classList.toggle('active', destructive)
-  text(
-    'reload',
-    s.config.last_reload_error ||
-      `Healthy · generation ${s.config.generation}${
-        s.config.last_reload_at && !s.config.last_reload_at.startsWith('0001-')
-          ? ` · checked ${localTime(s.config.last_reload_at)}`
-          : ''
-      }`
-  )
-  text(
-    'policies',
-    s.policies
-      .map(
-        p =>
-          `${policyLabel(p.policy)} — eligible after ${duration(
-            p.threshold_seconds
-          )}, configured ${actionLabel(p.action)}, effective ${actionLabel(
-            p.effective_action
-          )}${(p.match_tags || []).length ? `, tags ${(p.match_tags || []).join(', ')}` : ''}`
-      )
-      .join(' · ')
-  )
-  text(
-    'connection',
-    `${s.qbt_up ? 'Reachable' : 'Degraded / unreachable'} · qBittorrent ${
-      s.qbt_version || 'unknown'
-    } · Web API ${s.webapi_version || 'unknown'}`
-  )
-  text('last', localTime(s.last_successful_poll))
-  text('next', localTime(s.next_poll))
-  text('persistence', s.persistence_error || 'Healthy')
-  text('persistence', `${s.persistence_error || 'Healthy'} · tag sync ${s.tag_sync?.enabled ? 'enabled' : 'disabled'} (${s.tag_sync?.prefix || '—'}${s.tag_sync?.dry_run_suppressed ? ', dry-run suppressed' : ''})`)
-  text('error', s.poll_error || 'None')
-  text('load-warning', s.state_load_warning || 'None')
-  text('integrations', (s.integrations || []).map(a => `${a.kind}: ${!a.enabled ? 'disabled' : `${a.queue_fresh ? 'fresh queue' : 'queue unavailable / stale'} · ${a.code || 'waiting'}`}`).join(' · '))
-  text('recovery-count', `${(s.recovery_jobs || []).length} pending${s.dry_run ? ' · mutations paused' : ''}`)
-  const recovery = document.createElement('tbody')
-  for (const job of s.recovery_jobs || []) {
-    const row = document.createElement('tr')
-    cell(row, job.kind, job.mode)
-    cell(row, job.stage, job.code || '—')
-    cell(row, localTime(job.captured_at))
-    cell(row, localTime(job.expires_at))
-    cell(row, job.attempts, job.next_at && !job.next_at.startsWith('0001-') ? localTime(job.next_at) : 'Next worker cycle')
-    recovery.append(row)
+
+  const root = document.documentElement
+  const body = document.body
+
+  // --- Theme toggle ---------------------------------------------------------
+  const STORAGE_KEY = 'qbt-watchdog-theme'
+  const order = ['auto', 'light', 'dark']
+  function applyTheme (theme) {
+    root.setAttribute('data-theme', theme)
+    root.style.colorScheme = theme === 'auto' ? 'light dark' : theme
+    const control = document.getElementById('theme-toggle')
+    if (control) {
+      const label = control.querySelector('.theme-follow')
+      if (label) label.textContent = 'Theme: ' + theme
+    }
   }
-  empty(recovery, 5, 'No pending recovery jobs.')
-  byId('recovery-jobs').replaceChildren(...recovery.childNodes)
-  const cards = document.createDocumentFragment()
-  for (const [label, count] of [
-    ['Total torrents', s.summary.total],
-    ['In metadata', s.summary.metadata],
-    ['Protected', s.summary.protected],
-    ['Overdue', s.summary.overdue],
-    ['Warned', s.summary.would_delete],
-    ['Delete requested', s.summary.delete_requested],
-    ['Confirmed / startup', s.since_startup.deletions],
-    ['Warnings / startup', s.since_startup.would_deletions],
-    ['Confirmed / lifetime', s.lifetime.deletions],
-    ['Warnings / lifetime', s.lifetime.would_deletions]
-  ]) {
-    const card = document.createElement('div'),
-      strong = document.createElement('strong'),
-      span = document.createElement('span')
-    card.className = 'card'
-    strong.textContent = count
-    span.textContent = label
-    card.append(strong, span)
-    cards.append(card)
+  function nextTheme (current) {
+    const i = order.indexOf(current)
+    return order[(i + 1) % order.length]
   }
-  byId('cards').replaceChildren(cards)
-  const rows = document.createElement('tbody')
-  for (const t of s.torrents) {
-    const row = document.createElement('tr')
-    // A clock exists only for a torrent currently inside a policy partition
-    // and proven continuously observed there. Everything else shows a dash
-    // rather than a guess, and never a hypothetical classification.
-    const counting = Boolean(t.first_seen_policy)
-    const overdue = counting && t.remaining_seconds <= 0
-    if (overdue) row.className = 'overdue'
-    const [headline, reason, blocked] = decisionOf(t.decision)
-    const [left, leftDetail] = eligibility(t)
-    cell(row, t.name, t.short_hash)
-    cell(
-      row,
-      policyLabel(t.policy),
-      t.policy ? `${t.policy} · ${t.state}` : `${t.state} · no policy matches`
-    )
-    cell(row, headline, reason, blocked ? 'flag-blocked' : 'flag-eligible')
-    cell(
-      row,
-      t.policy ? actionLabel(t.configured_action) : '—',
-      effectiveNote(t)
-    )
-    cell(row, `${(t.progress * 100).toFixed(2)}%`, `downloaded ${bytes(t.downloaded)} · size ${bytes(t.size || 0)} / total ${bytes(t.total_size || 0)} · left ${bytes(t.amount_left || 0)} · completed ${bytes(t.completed || 0)}`)
-    cell(row, `${bytes(Math.max(0, t.download_speed))}/s`)
-    cell(
-      row,
-      `${t.num_seeds} / ${t.num_leechers}`,
-      t.seed_observed
-        ? 'Seed connection observed'
-        : 'No seed connection observed'
-    )
-    cell(row, t.category || '—', `${t.tags || 'No tags'}${(t.watchdog_tags || []).length ? ` · watchdog: ${(t.watchdog_tags || []).join(', ')}` : ''}`)
-    cell(row, localTime(t.added_at))
-    cell(
-      row,
-      counting ? duration(t.elapsed_seconds) : '—',
-      t.policy
-        ? `of ${duration(t.threshold_seconds)} required`
-        : 'No episode clock'
-    )
-    cell(row, left, leftDetail, overdue ? 'flag-overdue' : undefined)
-    rows.append(row)
-  }
-  empty(rows, 11, 'No torrents in the latest snapshot.')
-  byId('torrents').replaceChildren(...rows.childNodes)
-  const history = document.createElement('tbody')
-  for (const e of [...s.history].reverse()) {
-    const row = document.createElement('tr')
-    cell(row, localTime(e.time))
-    cell(row, e.action, e.integration || (e.policy ? policyLabel(e.policy) : 'Legacy event'))
-    cell(row, e.name || '—', e.short_hash)
-    cell(
-      row,
-      e.effective_action ? actionLabel(e.effective_action) : 'Unrecorded',
-      e.dry_run ? 'Dry-run override' : 'Policy action'
-    )
-    cell(row, e.outcome, e.error || '')
-    history.append(row)
-  }
-  empty(history, 5, 'No actions yet.')
-  byId('history').replaceChildren(...history.childNodes)
-}
-let interval = 5000
-async function refresh () {
+  let saved = null
   try {
-    const response = await fetch('/api/v1/status', {
-      cache: 'no-store',
-      credentials: 'same-origin',
-      signal: AbortSignal.timeout(10000)
+    saved = window.localStorage.getItem(STORAGE_KEY)
+  } catch (_) { /* storage unavailable */ }
+  let theme = order.indexOf(saved) >= 0 ? saved : 'auto'
+  applyTheme(theme)
+  const toggleButton = document.getElementById('theme-toggle')
+  if (toggleButton) {
+    toggleButton.addEventListener('click', function () {
+      theme = nextTheme(theme)
+      try {
+        window.localStorage.setItem(STORAGE_KEY, theme)
+      } catch (_) { /* storage unavailable */ }
+      applyTheme(theme)
     })
-    if (!response.ok) throw new Error('Status unavailable')
-    const snapshot = await response.json()
-    render(snapshot)
-    interval = Math.max(250, snapshot.refresh_seconds * 1000)
-    text(
-      'refresh-message',
-      `Updated ${localTime(snapshot.updated_at)} · times shown locally`
-    )
-  } catch (_) {
-    text(
-      'refresh-message',
-      'Status refresh failed. Displayed data may be stale; check connectivity or authentication.'
-    )
-  } finally {
-    window.setTimeout(refresh, interval)
   }
-}
-refresh()
+
+  // --- Time localization ----------------------------------------------------
+  const formatter = new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'medium'
+  })
+  const shortFormatter = new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'short',
+    timeStyle: 'short'
+  })
+  // Only ever localizes a bounded subtree (<time> elements inside scope), so a
+  // refresh never repaints the whole page.
+  function localize (scope) {
+    const scopeEl = scope || document
+    const times = scopeEl.querySelectorAll
+      ? scopeEl.querySelectorAll('time[datetime]')
+      : []
+    for (let i = 0; i < times.length; i++) {
+      const el = times[i]
+      const dt = el.getAttribute('datetime')
+      if (!dt) continue
+      const parsed = new Date(dt)
+      if (Number.isNaN(parsed.getTime())) continue
+      const fmt = el.hasAttribute('data-short') ? shortFormatter : formatter
+      el.textContent = fmt.format(parsed)
+    }
+  }
+  localize(document)
+
+  // --- Torrent filter ------------------------------------------------------
+  // Client-side name/state filtering. It only toggles the hidden attribute on
+  // server-rendered rows; it never builds markup, so hostile names stay inert.
+  function applyTorrentFilter () {
+    const search = document.getElementById('torrent-search')
+    const stateSel = document.getElementById('torrent-state')
+    const query = search ? search.value.trim().toLowerCase() : ''
+    const state = stateSel ? stateSel.value : ''
+    const rows = document.querySelectorAll('#torrent-list details.torrent')
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]
+      const name = (row.getAttribute('data-name') || '').toLowerCase()
+      const rowState = row.getAttribute('data-state') || ''
+      const matchesName = !query || name.indexOf(query) !== -1
+      const matchesState = !state || rowState === state
+      row.hidden = !(matchesName && matchesState)
+    }
+  }
+  const torrentSearch = document.getElementById('torrent-search')
+  const torrentState = document.getElementById('torrent-state')
+  if (torrentSearch) torrentSearch.addEventListener('input', applyTorrentFilter)
+  if (torrentState) torrentState.addEventListener('change', applyTorrentFilter)
+
+  // --- Activity filter -----------------------------------------------------
+  // Client-side name/policy/outcome/service filtering for the activity list.
+  // It only toggles the hidden attribute on server-rendered rows; it never
+  // builds markup, so hostile names stay inert.
+  function applyHistoryFilter () {
+    const search = document.getElementById('history-search')
+    const policySel = document.getElementById('history-policy')
+    const outcomeSel = document.getElementById('history-outcome')
+    const serviceSel = document.getElementById('history-service')
+    const query = search ? search.value.trim().toLowerCase() : ''
+    const policy = policySel ? policySel.value : ''
+    const outcome = outcomeSel ? outcomeSel.value : ''
+    const service = serviceSel ? serviceSel.value : ''
+    const rows = document.querySelectorAll('#history-list details.history')
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]
+      const name = (row.getAttribute('data-name') || '').toLowerCase()
+      const rowPolicy = row.getAttribute('data-policy') || ''
+      const rowOutcome = row.getAttribute('data-outcome') || ''
+      const rowService = row.getAttribute('data-service') || ''
+      const matchesName = !query || name.indexOf(query) !== -1
+      const matchesPolicy = !policy || rowPolicy === policy
+      const matchesOutcome = !outcome || rowOutcome === outcome
+      const matchesService = !service || rowService === service
+      row.hidden = !(matchesName && matchesPolicy && matchesOutcome && matchesService)
+    }
+  }
+  const historySearch = document.getElementById('history-search')
+  const historyPolicy = document.getElementById('history-policy')
+  const historyOutcome = document.getElementById('history-outcome')
+  const historyService = document.getElementById('history-service')
+  if (historySearch) historySearch.addEventListener('input', applyHistoryFilter)
+  if (historyPolicy) historyPolicy.addEventListener('change', applyHistoryFilter)
+  if (historyOutcome) historyOutcome.addEventListener('change', applyHistoryFilter)
+  if (historyService) historyService.addEventListener('change', applyHistoryFilter)
+
+  // Natural-navigation full page loads reset everything; the coordinator below
+  // re-initialises per page, so there is nothing to unbind here.
+
+  // --- Refresh coordinator ---------------------------------------------------
+  // ONE timer drives every live fragment. It polls only what is actually on
+  // this page ([data-refresh] containers), pauses while the tab is hidden,
+  // never overlaps requests, and answers a 204 (no swap) from the server by
+  // leaving the DOM — and its open rows, focus and selection — untouched.
+  const interval = parseInt(root.getAttribute('data-refresh-seconds'), 10)
+  const pollMs = (interval && interval > 0 ? interval : 30) * 1000
+
+  const stamps = {}      // partial URL -> last snapshot stamp (for change suppression)
+  let pending = 0        // in-flight fragment requests
+  let generation = 0     // bumped each tick; late responses are ignored
+  let timer = null
+  let capturedFocus = null
+
+  function fragments () {
+    return document.querySelectorAll('[data-refresh]')
+  }
+
+  function schedule () {
+    if (timer) window.clearTimeout(timer)
+    timer = window.setTimeout(tick, pollMs)
+  }
+
+  function captureFocus () {
+    const ae = document.activeElement
+    if (ae && ae.closest) {
+      const row = ae.closest('details[data-torrent], details[data-recovery], details[data-history]')
+      capturedFocus = row ? row.id : null
+    }
+  }
+
+  function restoreFocus () {
+    if (!capturedFocus) return
+    const row = document.getElementById(capturedFocus)
+    capturedFocus = null
+    if (!row) return
+    const summary = row.querySelector('summary')
+    if (summary) summary.focus()
+  }
+
+  function openParam (el) {
+    const open = []
+    const rows = el.querySelectorAll('details[open][data-torrent]')
+    for (let i = 0; i < rows.length; i++) {
+      const id = rows[i].getAttribute('data-torrent')
+      if (id) open.push(id)
+    }
+    return open.join(',')
+  }
+
+  function request (el, g) {
+    const url = el.getAttribute('data-refresh')
+    let qs = 'digest=' + encodeURIComponent(stamps[url] || '')
+    if (el.getAttribute('id') === 'torrent-list') {
+      qs += '&open=' + encodeURIComponent(openParam(el))
+    }
+    const sep = url.indexOf('?') >= 0 ? '&' : '?'
+    let settled = false
+    const done = function (stale) {
+      if (settled) return
+      settled = true
+      if (stale && g === generation) markStale(el)
+      pending -= 1
+      if (pending <= 0) {
+        pending = 0
+        restoreFocus()
+        schedule()
+      }
+    }
+    let promise = null
+    try {
+      promise = window.htmx.ajax('GET', url + sep + qs, { target: el })
+    } catch (_) {
+      promise = null
+    }
+    if (promise && typeof promise.then === 'function') {
+      promise.then(function () { done(false) }, function () { done(true) })
+    } else {
+      done(false)
+    }
+  }
+
+  function markStale (el) {
+    // Retain the last good data and flag it stale; a backend outage must never
+    // blank an already-rendered fragment.
+    el.classList.add('stale')
+  }
+
+  function tick () {
+    if (document.hidden) {
+      schedule()
+      return
+    }
+    if (pending > 0) {
+      schedule()
+      return
+    }
+    const els = fragments()
+    if (els.length === 0) {
+      schedule()
+      return
+    }
+    generation += 1
+    const g = generation
+    pending = els.length
+    captureFocus()
+    for (let i = 0; i < els.length; i++) {
+      request(els[i], g)
+    }
+  }
+
+  if (window.htmx) {
+    // Record the new snapshot stamp from each response so the next poll can ask
+    // the server to suppress an unchanged fragment with a 204.
+    body.addEventListener('htmx:afterRequest', function (evt) {
+      const el = evt.detail && (evt.detail.target || evt.detail.elt)
+      const url = el && el.getAttribute ? el.getAttribute('data-refresh') : null
+      if (!url) return
+      const xhr = evt.detail.xhr
+      if (xhr && xhr.getResponseHeader && xhr.status === 200) {
+        const stamp = xhr.getResponseHeader('X-Snapshot-Stamp')
+        if (stamp) stamps[url] = stamp
+      }
+    })
+    // Localize only the subtree that actually swapped, and re-apply the filter
+    // so newly added rows respect the active search/state selection.
+    body.addEventListener('htmx:afterSwap', function (evt) {
+      const target = evt.detail && evt.detail.target
+      if (target) localize(target)
+      applyTorrentFilter()
+      applyHistoryFilter()
+    })
+  }
+
+  // Start only on pages that actually have live fragments.
+  if (window.htmx && document.querySelector('[data-refresh]')) {
+    schedule()
+  }
+
+  // Cheap fallback: re-localize once a minute in case a fragment ever arrived
+  // without a swap hook. It touches only <time> elements, not the whole page.
+  window.setInterval(function () { localize(document) }, 30000)
+
+  // --- Settings editor status ---------------------------------------------
+  if (window.htmx) {
+    body.addEventListener('htmx:responseError', function (evt) {
+      const status = document.getElementById('settings-status')
+      if (!status || evt.detail.target.id !== 'settings-status') return
+      const statusCode = evt.detail.xhr.status
+      let message = 'Save failed.'
+      try {
+        const parsed = JSON.parse(evt.detail.xhr.responseText)
+        if (parsed && parsed.error) message = parsed.error
+      } catch (_) { /* non-JSON error body */ }
+      if (statusCode === 409) message = 'Configuration changed on disk — reload and retry.'
+      status.textContent = message
+    })
+    body.addEventListener('htmx:afterRequest', function (evt) {
+      const status = document.getElementById('settings-status')
+      if (!status || evt.detail.target.id !== 'settings-status') return
+      const parsed = JSON.parse(evt.detail.xhr.responseText)
+      if (parsed && parsed.status === 'applied') {
+        status.textContent = 'Configuration applied (generation ' + parsed.generation + ').'
+        return
+      }
+      if (parsed && parsed.status === 'rejected' && parsed.error) {
+        status.textContent = parsed.error
+      }
+    })
+  }
+
+  // --- Manual actions status ----------------------------------------------
+  if (window.htmx) {
+    body.addEventListener('htmx:responseError', function (evt) {
+      const status = evt.detail.target
+      if (!status || !status.hasAttribute('data-action-status')) return
+      let message = 'Action rejected.'
+      try {
+        const parsed = JSON.parse(evt.detail.xhr.responseText)
+        if (parsed && parsed.error) message = parsed.error
+      } catch (_) { /* non-JSON error body */ }
+      status.textContent = message
+      status.classList.remove('action-status-ok')
+      status.classList.add('action-status-error')
+    })
+    body.addEventListener('htmx:afterRequest', function (evt) {
+      const status = evt.detail.target
+      if (!status || !status.hasAttribute('data-action-status')) return
+      let message = 'Action queued.'
+      try {
+        const parsed = JSON.parse(evt.detail.xhr.responseText)
+        if (parsed && parsed.accepted && parsed.decision) {
+          message = 'Queued — decision: ' + parsed.decision
+        }
+      } catch (_) { /* non-JSON body */ }
+      status.textContent = message
+      status.classList.remove('action-status-error')
+      status.classList.add('action-status-ok')
+    })
+  }
+
+  // Pause while hidden; resume when the tab becomes visible again.
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && pending === 0) {
+      schedule()
+    }
+  })
+})()

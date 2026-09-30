@@ -57,6 +57,7 @@ type Event struct {
 	Action          string          `json:"action"`
 	Name            string          `json:"name"`
 	ShortHash       string          `json:"short_hash"`
+	CommandID       int64           `json:"command_id,omitempty"`
 	DryRun          bool            `json:"dry_run"`
 	Outcome         string          `json:"outcome"`
 	Error           string          `json:"error,omitempty"`
@@ -84,6 +85,11 @@ func boundedText(text string, limit int) string {
 	}
 	return result.String()
 }
+
+// BoundedText truncates free text to limit bytes on a rune boundary. It is the
+// single definition of text bounding, shared by Event.Bounded and by callers
+// that must bound a field before persisting it outside an Event.
+func BoundedText(text string, limit int) string { return boundedText(text, limit) }
 
 type State struct {
 	RecoveryJobs      map[string]RecoveryJob `json:"recovery_jobs"`

@@ -16,6 +16,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lmittmann/tint"
+	"golang.org/x/term"
+
 	"qbt-watchdog/internal/config"
 	"qbt-watchdog/internal/observability"
 	"qbt-watchdog/internal/qbt"
@@ -47,7 +50,7 @@ func run(args []string, out, stderr io.Writer) int {
 		return 2
 	}
 	logging := newLogSwitch(stderr)
-	logging.Apply(c.LogLevel, c.LogFormat)
+	logging.Apply(c.LogLevel, c.LogFormat, c.LogColor)
 	log := slog.New(logging)
 	log.Info("qbt-watchdog starting", "event", "startup", "version", version, "dry_run", c.DryRun, "poll_interval", c.PollInterval, "max_observation_gap", c.MaxObservationGap, "max_actions_per_poll", c.MaxDeletions, "max_attempts_per_episode", store.MaxAttempts)
 	announce(log, c)
@@ -76,7 +79,6 @@ func run(args []string, out, stderr io.Writer) int {
 		return 0
 	}
 	server := web.New(c, service.Snapshot, metrics)
-	server.Handler = web.DynamicHandler(service.Config, service.Snapshot, metrics)
 	// The service's manager owns the running configuration and the reload
 	// health that the status, UI and readiness surfaces report, so the watcher
 	// drives that same manager rather than a second one. Committing means the
@@ -87,10 +89,29 @@ func run(args []string, out, stderr io.Writer) int {
 		if err := service.Apply(next, func(candidate config.Config) (watchdog.Client, error) { return qbt.New(candidate, log) }); err != nil {
 			return err
 		}
-		logging.Apply(next.LogLevel, next.LogFormat)
+		logging.Apply(next.LogLevel, next.LogFormat, next.LogColor)
 		announce(log, next)
 		return nil
 	}
+	editor := config.NewEditor(manager.Path())
+	saver := web.ConfigSaverFunc{
+		ReadFunc: editor.Read,
+		SaveFunc: func(raw []byte, stamp string) (string, config.Status, error) {
+			newStamp, err := editor.SaveRaw(raw, stamp)
+			if err != nil {
+				return "", config.Status{}, err
+			}
+			next, err := config.Load(manager.Path())
+			if err != nil {
+				return newStamp, manager.Status(), err
+			}
+			if err := manager.Reload(next, commit); err != nil {
+				return newStamp, manager.Status(), err
+			}
+			return newStamp, manager.Status(), nil
+		},
+	}
+	server.Handler = web.DynamicHandlerWithActions(service.Config, service.Snapshot, metrics, saver, service)
 	watchDone := make(chan struct{})
 	go func() {
 		defer close(watchDone)
@@ -151,15 +172,42 @@ type logSwitch struct {
 
 func newLogSwitch(out io.Writer) *logSwitch { return &logSwitch{out: out} }
 
-func (l *logSwitch) Apply(level, format string) {
+func (l *logSwitch) Apply(level, format, color string) {
 	parsed := slog.LevelInfo
 	_ = parsed.UnmarshalText([]byte(level))
 	options := &slog.HandlerOptions{Level: parsed}
 	var handler slog.Handler = slog.NewJSONHandler(l.out, options)
-	if format == "text" {
+	switch format {
+	case "text":
 		handler = slog.NewTextHandler(l.out, options)
+	case "console":
+		handler = tint.NewTextHandler(l.out, &tint.Options{
+			Level:      parsed,
+			TimeFormat: time.Kitchen,
+			NoColor:    !resolveColor(l.out, color),
+		})
 	}
 	l.current.Store(&handler)
+}
+
+// resolveColor decides whether the console handler may emit ANSI color. The
+// decision honors the operator's explicit `always`/`never`, otherwise falling
+// back to terminal detection and the NO_COLOR convention.
+func resolveColor(out io.Writer, mode string) bool {
+	switch mode {
+	case "always":
+		return true
+	case "never":
+		return false
+	}
+	if _, ok := os.LookupEnv("NO_COLOR"); ok {
+		return false
+	}
+	file, ok := out.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(file.Fd()))
 }
 
 func (l *logSwitch) handler() slog.Handler { return *l.current.Load() }

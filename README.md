@@ -1,6 +1,6 @@
 # qbt-watchdog
 
-A small, stateful daemon that watches qBittorrent for torrents stuck in **Downloading metadata** (`metaDL`), **stalled downloads** (`stalledDL`), completed-looking torrents with no payload, or explicitly tagged stopped Arr-managed torrents across independent policies. It measures continuously observed time, reports overdue torrents in a read-only dashboard, and can remove them after a configurable timeout.
+A small, stateful daemon that watches qBittorrent for torrents stuck in **Downloading metadata** (`metaDL`), **stalled downloads** (`stalledDL`), completed-looking torrents with no payload, or explicitly tagged stopped Arr-managed torrents across independent policies. It measures continuously observed time, reports overdue torrents in a dashboard, and can remove them after a configurable timeout (or on demand via an authenticated manual action).
 
 **Start in dry-run mode.** Dry-run is enabled by default and never calls the delete endpoint or writes qBittorrent watchdog tags. Enabling deletion requires the deliberate setting `dry_run: false` in the configuration file. Removal preserves payload files by default; `action: delete_file` can permanently delete downloaded data through qBittorrent and is irreversible.
 
@@ -249,6 +249,7 @@ An enabled integration requires a valid HTTP(S) `url` and exactly one credential
 Modes:
 
 - `blocklist_and_search` removes the matching Arr queue item with `blocklist=true`, `removeFromClient=false`, `skipRedownload=true` and `changeCategory=false`, then sends a targeted `EpisodeSearch` (Sonarr) or `MoviesSearch` (Radarr).
+- `blocklist_only` removes the matching Arr queue item and blocklists the release the same way, but does not request a replacement.
 - `search_only` sends only the targeted search, without blocklisting or removing the Arr queue item.
 
 Explicit opt-in example using `.env` placeholders:
@@ -267,14 +268,14 @@ integrations:
 
 Recovery requires all of these: an enabled integration matching the torrent category, `dry_run: false`, a destructive effective policy (`delete` or `delete_file`), and `max_actions_per_poll` greater than zero. Warn-only and dry-run configurations never mutate Sonarr/Radarr. qBittorrent cleanup is not blocked by Arr outages: the watchdog captures recovery identity before deletion, but it makes no Arr network calls between the final qBittorrent safety read and the qBittorrent delete request.
 
-Each policy may override recovery with `arr_mode: inherit` (default), `none`, `blocklist_and_search`, or `search_only`. Service-level `integrations.<service>.mode` accepts only `blocklist_and_search` or `search_only`.
+Each policy may override recovery with `arr_mode: inherit` (default), `none`, `blocklist_and_search`, `blocklist_only`, or `search_only`. Service-level `integrations.<service>.mode` accepts only `blocklist_and_search`, `blocklist_only`, or `search_only`.
 
 Recovery identity is the exact qBittorrent torrent hash / Arr `downloadId`, never a torrent or release name. Sonarr season packs are aggregated into one recovery job containing all matching queue rows and episode IDs. The recovery workflow starts only after qBittorrent accepts deletion **and** a later successful full qBittorrent poll confirms that the hash disappeared. The Arr call never deletes imported media files; even blocklisting uses `removeFromClient=false`, because qBittorrent cleanup already happened under the watchdog's policy.
 
 Safety details and limits:
 
 - Queue snapshots are refreshed every 30 seconds and considered fresh for 2 minutes. Up to 500 recovery jobs are persisted, each with at most 200 queue/history/media IDs, a 24-hour lifetime, and five attempts per stage.
-- A vanished queue item in `blocklist_and_search` mode produces an incomplete/failed recovery outcome (`queue_vanished`); it is not silently downgraded to search-only and it does not write Sonarr/Radarr history/failed state.
+- A vanished queue item in a mode that blocklists (but does not search) produces an incomplete/failed recovery outcome (`queue_vanished`); it is not silently downgraded. When a mode also searches, a vanished queue item still proceeds to search if the media identity is known and the media is not already imported (the usual safety guards apply).
 - Ambiguous mutation outcomes are not blindly replayed. Jobs enter an uncertain state after outcomes such as mutation timeouts or restart during an intent stage.
 - Search command completion only means the Arr command finished; it does **not** prove a replacement was grabbed. Replacement/import checks conservatively ignore the captured pack itself.
 - The watchdog makes no exactly-once promise against Sonarr/Radarr's own recovery/import behavior. Arr may import, remove queue rows, or start searches independently.
@@ -370,20 +371,23 @@ A missing file starts empty. Invalid JSON, unsupported schema, invalid records, 
 
 ## Dashboard, endpoints, and security
 
-The web surface is read-only and uses embedded assets with no CDN, analytics, or frontend build dependencies. The dashboard shows all torrents, current policy only, configured versus effective action, observed time/threshold, “Eligible in,” versions, poll/persistence health, read-only recovery health/status, and recent actions. “Eligible in” is not a guaranteed deletion countdown: the action cap, exclusions, final qBittorrent re-read, persistence, retry budget and dry-run override still apply. Normally downloading torrents outside the closed policy set have no hypothetical classification or timer. Status uses UTC RFC 3339 timestamps and numeric seconds; the browser displays local times. Elapsed time reflects observations, not an independently advancing browser clock.
+The web surface uses embedded assets with no CDN, analytics, or frontend build dependencies, and a vendored htmx for partial refreshes with light/dark themes. The dashboard shows all torrents, current policy only, configured versus effective action, observed time/threshold, “Eligible in,” versions, poll/persistence health, recovery health/status, and recent actions. Behind authentication it also exposes a settings editor (comment-preserving YAML editing with conflict detection) and manual actions (`run_now` to accelerate a still-waiting torrent, or `explicit` removal). “Eligible in” is not a guaranteed deletion countdown: the action cap, exclusions, final qBittorrent re-read, persistence, retry budget and dry-run override still apply. Normally downloading torrents outside the closed policy set have no hypothetical classification or timer. Status uses UTC RFC 3339 timestamps and numeric seconds; the browser displays local times. Elapsed time reflects observations, not an independently advancing browser clock.
 
 | Endpoint                                      | Purpose                                                                                         | Authentication                                                      |
 | --------------------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `GET /`                                       | Auto-refreshing dashboard.                                                                      | Basic Auth when configured.                                         |
+| `GET /`                                       | Auto-refreshing dashboard (HTMX server-rendered).                                               | Basic Auth when configured.                                         |
 | `GET /api/v1/status`                          | Schema-versioned in-memory snapshot; no qBittorrent request.                                    | Basic Auth when configured.                                         |
+| `GET /api/v1/config`                          | Raw configuration document plus an opaque stamp for the settings editor.                        | Basic Auth when configured.                                         |
+| `POST /api/v1/config`                         | Save an edited configuration; preserves comments; conflicts return 409.                         | Auth + same-origin CSRF required.                                   |
+| `POST /api/v1/actions`                        | Queue a manual action (`run_now` / `explicit`) by short hash; 202, executed by the next poll.   | Auth + same-origin CSRF required.                                   |
 | `GET /healthz`                                | HTTP 200 when the HTTP server is alive, independent of qBittorrent.                             | Always public.                                                      |
 | `GET /readyz`                                 | HTTP 200 after a successful, recent poll with healthy persistence; otherwise 503 with a reason. | Always public.                                                      |
 | `GET /metrics`                                | Prometheus/OpenMetrics exposition.                                                              | Public by default; follows Basic Auth when `metrics_public: false`. |
-| `GET /assets/app.js`, `GET /assets/style.css` | Embedded static assets, without torrent data.                                                   | Public.                                                             |
+| `GET /assets/app.js`, `GET /assets/style.css`, `GET /assets/htmx.min.js` | Embedded static assets, without torrent data.                             | Public.                                                             |
 
-Readiness follows the age of the last successful poll, not simply the latest `qbt_up` value: it can remain ready briefly after a poll failure. A rejected configuration reload degrades readiness deliberately. Recovery health/status is read-only and separate from core readiness; a stale Sonarr/Radarr queue does not by itself make `/readyz` fail. Docker's built-in healthcheck tests **liveness**, not readiness. If you change the internal listen port, update or override the image healthcheck too.
+Readiness follows the age of the last successful poll, not simply the latest `qbt_up` value: it can remain ready briefly after a poll failure. A rejected configuration reload degrades readiness deliberately. Recovery health/status is separate from core readiness; a stale Sonarr/Radarr queue does not by itself make `/readyz` fail. Docker's built-in healthcheck tests **liveness**, not readiness. If you change the internal listen port, update or override the image healthcheck too.
 
-Configure both `web_username` and `web_password` (or `web_password_file`) to protect the dashboard and status API. To protect metrics as well, set `metrics_public: false`; that setting alone does not enable authentication if no web credentials exist. The supplied Compose file does not configure web authentication. Its loopback host binding does not prevent access from other containers on the shared network.
+Configure both `web_username` and `web_password` (or `web_password_file`) to protect the dashboard, status API, and the settings/manual-action endpoints. The mutation endpoints (`POST /api/v1/config` and `POST /api/v1/actions`) additionally require the same-origin CSRF check and refuse to run without web credentials. To protect metrics as well, set `metrics_public: false`; that setting alone does not enable authentication if no web credentials exist. The supplied Compose file does not configure web authentication. Its loopback host binding does not prevent access from other containers on the shared network.
 
 The HTTP server has no built-in TLS listener. Keep it on trusted networks or behind a TLS-terminating reverse proxy; Basic Auth over plain HTTP does not encrypt credentials. Do not expose it directly to the internet. Response hardening includes a restrictive CSP, framing denial, no-referrer and nosniff headers, server timeouts, and bounded headers. UI/status responses disable caching. Torrent-controlled text is escaped and rendered without HTML injection. Logs and public status use short hashes, but the dashboard/status intentionally expose names, categories, and tags.
 

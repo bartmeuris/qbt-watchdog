@@ -41,6 +41,50 @@ func setPartition(c *fakeClient, id config.PolicyID) {
 	}
 }
 
+// TestClassifierAgreesWithTheGate verifies classify() derives its winner from
+// the same predicates that drive execution: it equals matchingPolicy() whenever
+// the torrent is not excluded, and equals policy() for the common non-narrowed
+// cases, so the explanation and the gate can never disagree on the winner.
+func TestClassifierAgreesWithTheGate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		torrent   qbt.Torrent
+		protected bool
+	}{
+		{name: "metadata", torrent: torrent(hashA)},
+		{name: "stalled no seeders", torrent: stalled(hashA, 0, 0)},
+		{name: "stalled seeders seen", torrent: stalled(hashA, 0, 3)},
+		{name: "stalled partial", torrent: stalled(hashA, .5, 0)},
+		{name: "completed no data", torrent: qbt.Torrent{Hash: hashA, Name: "completed", State: "uploading", TotalSize: 1024, AmountLeft: 0, Downloaded: 0, Size: 0}},
+		{name: "stopped arr managed", torrent: qbt.Torrent{Hash: hashA, Name: "stopped", State: "stoppedDL", Progress: .5, Downloaded: 1024, TotalSize: 2048, Size: 1024, Tags: "Sonarr"}},
+		{name: "ordinary download", torrent: qbt.Torrent{Hash: hashA, Name: "ordinary", State: "downloading"}},
+		{name: "excluded by tag", torrent: func() qbt.Torrent {
+			x := stalled(hashA, 0, 0)
+			x.Tags = "keep"
+			return x
+		}(), protected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _, _ := fixture(t)
+			s.state.SeedObserved[hashA] = tc.torrent.NumSeeds > 0
+			won, _ := s.classify(tc.torrent)
+			if tc.protected {
+				if won != "" {
+					t.Fatal("excluded torrent classified", won)
+				}
+				return
+			}
+			if won != s.matchingPolicy(tc.torrent) {
+				t.Fatal("classifier disagreed with the gate", won, s.matchingPolicy(tc.torrent))
+			}
+			// For the non-narrowed cases the raw partition and the gate agree.
+			if s.policy(tc.torrent) == s.matchingPolicy(tc.torrent) && won != s.policy(tc.torrent) {
+				t.Fatal("classifier disagreed with the raw partition", won, s.policy(tc.torrent))
+			}
+		})
+	}
+}
+
 func TestEveryPolicyActionAndDryRun(t *testing.T) {
 	for _, id := range config.PolicyIDs() {
 		for _, action := range []config.Action{config.Warn, config.Delete, config.DeleteFile} {

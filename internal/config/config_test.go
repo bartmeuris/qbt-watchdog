@@ -323,7 +323,7 @@ func TestDryRunOverridesEveryAction(t *testing.T) {
 }
 
 func TestEffectiveArrMode(t *testing.T) {
-	for _, serviceDefault := range []ArrMode{BlocklistAndSearch, SearchOnly} {
+	for _, serviceDefault := range []ArrMode{BlocklistAndSearch, BlocklistOnly, SearchOnly} {
 		for _, tc := range []struct {
 			policyMode ArrMode
 			want       ArrMode
@@ -331,6 +331,7 @@ func TestEffectiveArrMode(t *testing.T) {
 		}{
 			{InheritArrMode, serviceDefault, true},
 			{BlocklistAndSearch, BlocklistAndSearch, true},
+			{BlocklistOnly, BlocklistOnly, true},
 			{SearchOnly, SearchOnly, true},
 			{NoArrMode, "", false},
 		} {

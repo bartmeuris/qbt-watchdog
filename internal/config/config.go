@@ -125,7 +125,7 @@ type Config struct {
 
 	IncludeCategories, ExcludeCategories, ExcludeTags []string
 
-	StateFile, Listen, TLSCAFile, LogLevel, LogFormat, ConfigFile string
+	StateFile, Listen, TLSCAFile, LogLevel, LogFormat, LogColor, ConfigFile string
 
 	Policies map[PolicyID]Policy
 
@@ -563,6 +563,7 @@ type fileConfig struct {
 	TLSCAFile                 string                  `json:"tls_ca_file"`
 	LogLevel                  string                  `json:"log_level"`
 	LogFormat                 string                  `json:"log_format"`
+	LogColor                  string                  `json:"log_color"`
 	Policies                  map[PolicyID]filePolicy `json:"policies"`
 	TagSync                   fileTagSync             `json:"tag_sync"`
 	Integrations              *fileIntegrations       `json:"integrations"`
@@ -577,7 +578,7 @@ func defaults() fileConfig {
 		MaxDeletions: 10, HistoryLimit: 100,
 		ExcludeTags: []string{"keep", "qbt-watchdog-ignore"},
 		StateFile:   "/data/state.json", Listen: ":8080",
-		LogLevel: "info", LogFormat: "json",
+		LogLevel: "info", LogFormat: "json", LogColor: "auto",
 		TagSync:      fileTagSync{Prefix: "qbtw-", MaxWritesPerPoll: 20},
 		Integrations: defaultIntegrations(),
 	}
@@ -652,7 +653,7 @@ func build(f fileConfig) (Config, error) {
 		ExcludeTags:       normalizeList(f.ExcludeTags),
 		TagSync:           TagSync{Enabled: f.TagSync.Enabled, Prefix: f.TagSync.Prefix, MaxWritesPerPoll: f.TagSync.MaxWritesPerPoll},
 		StateFile:         f.StateFile, Listen: f.Listen, TLSCAFile: f.TLSCAFile,
-		LogLevel: f.LogLevel, LogFormat: f.LogFormat, Policies: policies,
+		LogLevel: f.LogLevel, LogFormat: f.LogFormat, LogColor: f.LogColor, Policies: policies,
 	}
 	if err = parseDurations(f, &c); err != nil {
 		return Config{}, err
@@ -770,7 +771,7 @@ func parsePolicies(configured map[PolicyID]filePolicy) (map[PolicyID]Policy, err
 			return nil, errors.New("policy action must be warn, delete or delete_file")
 		}
 		if !arrMode.ValidForPolicy() {
-			return nil, errors.New("policy arr_mode must be inherit, none, blocklist_and_search or search_only")
+			return nil, errors.New("policy arr_mode must be inherit, none, blocklist_and_search, blocklist_only or search_only")
 		}
 		duration, err := time.ParseDuration(threshold)
 		if err != nil || duration <= 0 {
@@ -872,8 +873,11 @@ func validate(c *Config) error {
 	if !slices.Contains([]string{"debug", "info", "warn", "error"}, c.LogLevel) {
 		return errors.New("log_level must be debug, info, warn or error")
 	}
-	if c.LogFormat != "json" && c.LogFormat != "text" {
-		return errors.New("log_format must be json or text")
+	if !slices.Contains([]string{"json", "text", "console"}, c.LogFormat) {
+		return errors.New("log_format must be json, text or console")
+	}
+	if !slices.Contains([]string{"auto", "always", "never"}, c.LogColor) {
+		return errors.New("log_color must be auto, always or never")
 	}
 	if c.TLSCAFile == "" {
 		return nil

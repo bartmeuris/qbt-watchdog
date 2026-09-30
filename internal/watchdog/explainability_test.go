@@ -197,3 +197,33 @@ func TestDecisionVocabularyIsClosed(t *testing.T) {
 		t.Fatal("decision vocabulary changed without updating its consumers", len(seen))
 	}
 }
+
+// TestDecisionAndGateVocabulariesAreClosed keeps both the decision and gate
+// vocabularies honest and proves a single total label map covers each value,
+// so Phase 4 templates can render every outcome without a fallthrough.
+func TestDecisionAndGateVocabulariesAreClosed(t *testing.T) {
+	decisionLabels := DecisionLabels()
+	for _, d := range Decisions() {
+		if _, ok := decisionLabels[d]; !ok || decisionLabels[d] == "" {
+			t.Fatal("decision missing a label", d)
+		}
+	}
+	if len(decisionLabels) != len(Decisions()) {
+		t.Fatal("decision label map has stray entries", len(decisionLabels), len(Decisions()))
+	}
+
+	gateLabels := GateLabels()
+	seenGates := map[string]bool{}
+	for _, g := range GateNames() {
+		if seenGates[g] {
+			t.Fatal("duplicate gate", g)
+		}
+		seenGates[g] = true
+		if _, ok := gateLabels[g]; !ok || gateLabels[g] == "" {
+			t.Fatal("gate missing a label", g)
+		}
+	}
+	if len(gateLabels) != len(GateNames()) {
+		t.Fatal("gate label map has stray entries", len(gateLabels), len(GateNames()))
+	}
+}

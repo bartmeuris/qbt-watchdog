@@ -12,7 +12,11 @@ type PolicyView struct {
 	Action           config.Action   `json:"action"`
 	EffectiveAction  config.Action   `json:"effective_action"`
 	ThresholdSeconds float64         `json:"threshold_seconds"`
-	MatchTags        []string        `json:"match_tags,omitempty"`
+	// ArrMode is the configured recovery mode for this policy (inherit, none
+	// or an explicit mode). It is published so the UI can explain inheritance
+	// and per-service differences without reaching into the running config.
+	ArrMode   config.ArrMode `json:"arr_mode"`
+	MatchTags []string       `json:"match_tags,omitempty"`
 }
 
 // The decision vocabulary is closed. Every value either states that an action
@@ -43,6 +47,78 @@ func Decisions() []string {
 		DecisionWarned, DecisionRetryLimitReached,
 	}
 }
+
+// DecisionLabels maps every Decision value to its human headline (the same
+// twelve pairs the user interface renders). It is a closed, total map so a
+// Phase 4 template can rely on every value naming an explanation instead of
+// being trusted to. An unknown value is impossible: Decisions() is closed.
+func DecisionLabels() map[string]string {
+	return map[string]string{
+		DecisionNotApplicable:     "Not applicable",
+		DecisionTracking:          "Counting down",
+		DecisionEligible:          "Eligible now",
+		DecisionProtected:         "Protected",
+		DecisionNonzeroProgress:   "Has progress",
+		DecisionNonzeroDownloaded: "Has payload",
+		DecisionPayloadPresent:    "Payload present",
+		DecisionDeleteRequested:   "Delete pending",
+		DecisionActionsDisabled:   "Actions disabled",
+		DecisionWarned:            "Already warned",
+		DecisionRetryLimitReached: "Retry limit reached",
+	}
+}
+
+// Gate Name values are a closed vocabulary. Each names one evaluation stage in
+// the exact order evaluate() walks it, so a rendered trace is always total and
+// ordered. Presentation layers list them via GateNames and label them via
+// GateLabels, never by hard-coding free-form strings.
+const (
+	GateClassification = "classification"
+	GatePayloadPresent = "payload_present"
+	GateConfigured     = "configured"
+	GateExclusions     = "exclusions"
+	GateFieldChecks    = "field_checks"
+	GatePendingDelete  = "pending_delete"
+	GateContinuity     = "continuity"
+	GateThreshold      = "threshold"
+	GateCap            = "cap"
+	GateDryRun         = "dry_run"
+	GateAttempts       = "attempts"
+)
+
+// GateNames lists the closed gate vocabulary in evaluation order.
+func GateNames() []string {
+	return []string{
+		GateClassification, GatePayloadPresent, GateConfigured, GateExclusions,
+		GateFieldChecks, GatePendingDelete, GateContinuity, GateThreshold,
+		GateCap, GateDryRun, GateAttempts,
+	}
+}
+
+// GateLabels maps every gate Name to a headline for an ordered walkthrough.
+func GateLabels() map[string]string {
+	return map[string]string{
+		GateClassification: "Classification",
+		GatePayloadPresent: "Payload present",
+		GateConfigured:     "Policy configured",
+		GateExclusions:     "Exclusions",
+		GateFieldChecks:    "Field checks",
+		GatePendingDelete:  "Pending delete",
+		GateContinuity:     "Continuity",
+		GateThreshold:      "Threshold",
+		GateCap:            "Action cap",
+		GateDryRun:         "Dry run",
+		GateAttempts:       "Attempt budget",
+	}
+}
+
+// ProtectedBy names each distinct exclusion that can fire, in the order
+// protected() evaluates them, so the trace can say which one held.
+const (
+	ProtectedByCategoryExcluded    = "category-excluded"
+	ProtectedByCategoryNotIncluded = "category-not-included"
+	ProtectedByTagExcluded         = "tag-excluded"
+)
 
 var completedStates = map[string]bool{
 	"uploading": true,
@@ -127,6 +203,83 @@ func (s *Service) matchingPolicy(t qbt.Torrent) config.PolicyID {
 		return ""
 	}
 	return id
+}
+
+// PolicyRejection names one configured policy that did not win classification
+// for this torrent and why, in a self-contained human sentence fragment.
+type PolicyRejection struct {
+	Policy config.PolicyID `json:"policy"`
+	Reason string          `json:"reason"`
+}
+
+// classify returns the single policy that won this torrent's evaluation and,
+// for every configured policy that did not win, why it did not. The winner is
+// the same value matchingPolicy() yields, so the classifier and the execution
+// gate can never disagree; only the explanation is added.
+func (s *Service) classify(t qbt.Torrent) (config.PolicyID, []PolicyRejection) {
+	won := s.matchingPolicy(t)
+	rejections := make([]PolicyRejection, 0, len(s.c.Policies))
+	for _, id := range config.PolicyIDs() {
+		if _, configured := s.c.Policies[id]; !configured {
+			continue
+		}
+		if id == won {
+			continue
+		}
+		rejections = append(rejections, PolicyRejection{Policy: id, Reason: s.rejectReason(t, id)})
+	}
+	return won, rejections
+}
+
+// rejectReason explains why a configured policy id is not this torrent's
+// partition. It mirrors the branches of policy() in reverse, so every string
+// is a stable, self-contained fragment a template can render verbatim.
+func (s *Service) rejectReason(t qbt.Torrent, id config.PolicyID) string {
+	if s.protected(t) {
+		return "protected by exclusion"
+	}
+	if id == config.Metadata && t.State != "metaDL" {
+		return "state is not metaDL"
+	}
+	if id == config.Metadata {
+		return "metadata state matched, but nonzero progress narrowed it away"
+	}
+	switch id {
+	case config.CompletedNoData:
+		if !completedStates[t.State] {
+			return "state is not a completed state"
+		}
+		if zeroPayload(t) {
+			return "completed with no payload, but another partition took precedence"
+		}
+		return "downloaded payload present"
+	case config.StoppedArrManaged:
+		if !stoppedStates[t.State] && !completedStates[t.State] {
+			return "state is not a stopped state"
+		}
+		if !s.matchesStoppedArrManaged(t) {
+			return "stopped but not Arr-managed via match tags"
+		}
+		return "stopped and Arr-managed, but completed-no-data took precedence"
+	default: // the three stalled partitions
+		if t.State != "stalledDL" {
+			return "state is not stalledDL"
+		}
+		if t.Progress >= 1 {
+			return "progress >= 1"
+		}
+		if t.Progress > 0 {
+			return "progress > 0 so it would be partial"
+		}
+		seeded := s.state.SeedObserved[t.Hash] || t.NumSeeds > 0
+		if id == config.StalledSeedersSeen && !seeded {
+			return "no seeders observed after payload check"
+		}
+		if id == config.StalledNoSeeders && seeded {
+			return "seeders observed, so it would be seeders-seen"
+		}
+		return "a sibling stalled partition won"
+	}
 }
 
 // Retain exits, transitions and seed sightings even if later batch reads fail.

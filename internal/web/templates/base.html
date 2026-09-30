@@ -1,0 +1,83 @@
+{{define "head"}}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>qbt-watchdog</title>
+<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/htmx.min.js" defer></script>
+<script src="/assets/app.js" defer></script>
+{{end}}
+
+{{define "header"}}
+<header>
+    <div class="brand">
+        <span class="app-name">qbt-watchdog</span>
+    </div>
+    <div class="header-right">
+        {{template "services" .}}
+        <span id="mode" class="mode{{if .Snapshot.DryRun}} mode-dry{{else if hasDestructive .Snapshot}} mode-active{{end}}">
+            {{if .Snapshot.DryRun}}Dry run{{else if hasDestructive .Snapshot}}Live actions{{else}}Warn only{{end}}
+        </span>
+    </div>
+</header>
+{{end}}
+
+{{define "services"}}
+<div class="services" id="services" data-refresh="/partials/services">
+    {{template "services-inner" .}}
+</div>
+{{end}}
+
+{{define "services-inner"}}
+{{range serviceIndicators .Snapshot}}{{template "service_indicator" .}}{{end}}
+{{end}}
+
+{{define "service_indicator"}}
+<details class="service service-{{.Status}}" id="svc-{{.ID}}">
+    <summary>
+        <span class="dot" aria-hidden="true"></span>
+        <span class="svc-name">{{.Name}}</span>
+        <span class="sr-only">— {{.StatusLabel}}</span>
+    </summary>
+    <div class="popover">
+        <dl>
+            <dt>Status</dt><dd>{{.StatusLabel}}</dd>
+            <dt>Last contact</dt><dd>{{timeOrDash .LastContact}}</dd>
+            <dt>Latest error</dt><dd>{{dash .Error}}</dd>
+            <dt>Latest action</dt><dd>{{dash .LastAction}}</dd>
+        </dl>
+    </div>
+</details>
+{{end}}
+
+{{define "nav"}}
+<nav aria-label="Primary">
+    <a href="/"{{if eq .Page "overview"}} aria-current="page"{{end}}>Overview</a>
+    <a href="/policies"{{if eq .Page "policies"}} aria-current="page"{{end}}>Active policies</a>
+    <a href="/activity"{{if eq .Page "activity"}} aria-current="page"{{end}}>Activity</a>
+    <a href="/settings"{{if eq .Page "settings"}} aria-current="page"{{end}}>Settings</a>
+</nav>
+{{end}}
+
+{{define "base"}}
+<!doctype html>
+<html lang="en" data-theme="auto" data-refresh-seconds="{{refreshEvery .Snapshot.RefreshSeconds}}">
+<head>
+    {{template "head" .}}
+</head>
+<body>
+    {{template "header" .}}
+    {{template "nav" .}}
+    <main id="content">
+        {{if eq .Page "overview"}}
+        {{template "overview" .}}
+        {{template "overview_toolbar" .}}
+        {{template "torrents" .}}
+        {{template "recent" .}}
+        {{end}}
+        {{if eq .Page "policies"}}{{template "policies" .}}{{end}}
+        {{if eq .Page "activity"}}{{template "history" .}}{{template "recovery" .}}{{end}}
+        {{if eq .Page "settings"}}{{template "settings" .}}{{end}}
+    </main>
+</body>
+</html>
+{{end}}

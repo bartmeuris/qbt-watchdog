@@ -34,6 +34,7 @@ type RecoveryJob struct {
 	Kind       config.ArrKind  `json:"kind"`
 	Endpoint   string          `json:"endpoint_fingerprint"`
 	Hash       string          `json:"hash"`
+	Name       string          `json:"name,omitempty"`
 	Policy     config.PolicyID `json:"policy"`
 	Action     config.Action   `json:"action"`
 	EpisodeAt  time.Time       `json:"episode_at"`
@@ -99,7 +100,7 @@ func digest(s string) bool {
 
 func RecoveryCode(code string) bool {
 	switch code {
-	case "", "accepted", "not_found", "rejected", "transport_failure", "ambiguous_timeout", "identity_missing", "identity_incomplete", "queue_vanished", "safety_unavailable", "replacement_queued", "already_imported", "search_completed", "command_failed", "expired", "cancelled", "restart_uncertain", "endpoint_changed", "capacity", "attempts_exhausted", "qbt_unaccepted", "confirmation_aborted", "own_search_pending":
+	case "", "accepted", "not_found", "rejected", "transport_failure", "ambiguous_timeout", "identity_missing", "identity_incomplete", "queue_vanished", "safety_unavailable", "replacement_queued", "already_imported", "search_completed", "blocklist_completed", "command_failed", "expired", "cancelled", "restart_uncertain", "endpoint_changed", "capacity", "attempts_exhausted", "qbt_unaccepted", "confirmation_aborted", "own_search_pending":
 		return true
 	}
 	return false

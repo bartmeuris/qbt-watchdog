@@ -323,10 +323,10 @@ categories = ["tv"]
 }
 
 func TestArrModeAndKindVocabulary(t *testing.T) {
-	if len(ArrModes()) != 2 || !BlocklistAndSearch.Valid() || !SearchOnly.Valid() {
+	if len(ArrModes()) != 3 || !BlocklistAndSearch.Valid() || !BlocklistOnly.Valid() || !SearchOnly.Valid() {
 		t.Fatal("unexpected mode vocabulary")
 	}
-	if len(PolicyArrModes()) != 4 || !InheritArrMode.ValidForPolicy() || !NoArrMode.ValidForPolicy() || !BlocklistAndSearch.ValidForPolicy() || !SearchOnly.ValidForPolicy() {
+	if len(PolicyArrModes()) != 5 || !InheritArrMode.ValidForPolicy() || !NoArrMode.ValidForPolicy() || !BlocklistAndSearch.ValidForPolicy() || !BlocklistOnly.ValidForPolicy() || !SearchOnly.ValidForPolicy() {
 		t.Fatal("unexpected policy mode vocabulary")
 	}
 	if ArrMode("").Valid() || ArrMode("BLOCKLIST_AND_SEARCH").Valid() {
@@ -334,6 +334,12 @@ func TestArrModeAndKindVocabulary(t *testing.T) {
 	}
 	if InheritArrMode.Valid() || NoArrMode.Valid() {
 		t.Fatal("policy-only modes must not be valid service modes")
+	}
+	if !BlocklistAndSearch.Blocklists() || !BlocklistOnly.Blocklists() || SearchOnly.Blocklists() {
+		t.Fatal("blocklist modes must be exactly blocklist_and_search and blocklist_only")
+	}
+	if !BlocklistAndSearch.Searches() || !SearchOnly.Searches() || BlocklistOnly.Searches() {
+		t.Fatal("search modes must be exactly blocklist_and_search and search_only")
 	}
 	if string(Sonarr) != "sonarr" || string(Radarr) != "radarr" {
 		t.Fatal("kind names are part of the configuration surface")

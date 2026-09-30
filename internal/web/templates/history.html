@@ -1,0 +1,73 @@
+{{define "history"}}
+<section id="history" class="panel" aria-labelledby="history-title">
+    <div class="section-heading">
+        <h2 id="history-title">Action history</h2>
+        <p>Newest first · limited to the last {{.Snapshot.Limits.HistoryLimit}} events</p>
+    </div>
+    {{template "history_toolbar" .}}
+    <div class="list-head history-head" aria-hidden="true">
+        <span>Time</span><span>Torrent</span><span>Policy</span><span>Action</span><span>Outcome</span><span>Service</span>
+    </div>
+    <div class="history-list" id="history-list" data-refresh="/partials/history-rows">
+        {{template "history-rows" .}}
+    </div>
+</section>
+{{end}}
+
+{{define "history_toolbar"}}
+<div class="toolbar" role="search" aria-label="Activity filters">
+    <label for="history-search">Filter</label>
+    <input type="search" id="history-search" placeholder="Filter by torrent name…" autocomplete="off">
+    <label for="history-policy">Policy</label>
+    <select id="history-policy">
+        <option value="">All policies</option>
+        {{range historyPolicies .Snapshot}}<option value="{{.}}">{{policyLabel .}}</option>{{end}}
+    </select>
+    <label for="history-outcome">Outcome</label>
+    <select id="history-outcome">
+        <option value="">All outcomes</option>
+        {{range historyOutcomes .Snapshot}}<option value="{{.}}">{{outcomeLabel .}}</option>{{end}}
+    </select>
+    <label for="history-service">Service</label>
+    <select id="history-service">
+        <option value="">All services</option>
+        {{range historyServices .Snapshot}}<option value="{{.}}">{{.}}</option>{{end}}
+    </select>
+</div>
+{{end}}
+
+{{define "history-rows"}}
+{{range .History}}{{template "history_row" .}}{{else}}<p class="empty">No actions yet.</p>{{end}}
+{{end}}
+
+{{define "history_row"}}
+<details class="history{{historyRowClass .Event}}" id="history-{{if .Event.CommandID}}{{.Event.CommandID}}{{else}}{{.Event.Time.UnixNano}}{{end}}" data-history data-name="{{.Event.Name}}" data-policy="{{.Event.Policy}}" data-outcome="{{.Event.Outcome}}" data-service="{{historyService .Event}}">
+    <summary>
+        <span class="t-time">{{timeHTMLShort .Event.Time}}</span>
+        <span class="t-torrent">
+            <span class="t-name">{{if .Event.Name}}{{.Event.Name}}{{else}}—{{end}}</span>
+            <code class="t-hash">{{.Event.ShortHash}}</code>
+        </span>
+        <span class="t-policy">{{if .Event.Policy}}{{policyOrUnclass .Event.Policy}}{{else}}—{{end}}</span>
+        <span class="t-action">{{actionEventLabel .Event.Action}}</span>
+        <span class="t-outcome{{outcomeClass .Event.Outcome}}">
+            {{outcomeLabel .Event.Outcome}}
+            {{if .Event.DryRun}}<small>dry run</small>{{end}}
+        </span>
+        <span class="t-service">{{historyService .Event}}</span>
+    </summary>
+    <div class="detail">
+        <dl class="facts">
+            <dt>Action</dt><dd>{{actionEventLabel .Event.Action}} <code>{{.Event.Action}}</code></dd>
+            <dt>Outcome</dt><dd>{{outcomeLabel .Event.Outcome}} <code>{{.Event.Outcome}}</code></dd>
+            <dt>Policy</dt><dd>{{if .Event.Policy}}{{policyOrUnclass .Event.Policy}} <code>{{.Event.Policy}}</code>{{else}}—{{end}}</dd>
+            <dt>Effective action</dt><dd>{{if .Event.EffectiveAction}}{{actionLabel .Event.EffectiveAction}}{{else}}Unrecorded{{end}}</dd>
+            <dt>Torrent</dt><dd>{{if .Event.Name}}{{.Event.Name}} · {{end}}{{.Event.ShortHash}}</dd>
+            <dt>Service</dt><dd>{{historyService .Event}}</dd>
+            <dt>Command ID</dt><dd>{{if .Event.CommandID}}{{.Event.CommandID}}{{else}}—{{end}}</dd>
+            {{if .Event.Error}}<dt>Detail</dt><dd>{{.Event.Error}}</dd>{{end}}
+        </dl>
+        {{template "timeline" .Timeline}}
+    </div>
+</details>
+{{end}}

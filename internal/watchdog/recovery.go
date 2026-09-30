@@ -45,16 +45,23 @@ type integrationRuntime struct {
 type IntegrationStatus struct {
 	Kind    config.ArrKind `json:"kind"`
 	Enabled bool           `json:"enabled"`
+	// Mode is the service-level recovery mode, published so the UI can resolve
+	// a policy's "inherit" mode to the concrete per-service behavior.
+	Mode    config.ArrMode `json:"mode"`
 	Fresh   bool           `json:"queue_fresh"`
 	QueueAt time.Time      `json:"queue_at"`
 	Code    string         `json:"code,omitempty"`
 }
 
 type RecoveryStatus struct {
+	ID         string              `json:"id"`
 	Kind       config.ArrKind      `json:"kind"`
 	Stage      store.RecoveryStage `json:"stage"`
 	Mode       config.ArrMode      `json:"mode"`
 	Code       string              `json:"code,omitempty"`
+	ShortHash  string              `json:"short_hash,omitempty"`
+	Policy     config.PolicyID     `json:"policy,omitempty"`
+	CommandID  int64               `json:"command_id,omitempty"`
 	CapturedAt time.Time           `json:"captured_at"`
 	ExpiresAt  time.Time           `json:"expires_at"`
 	NextAt     time.Time           `json:"next_at"`
@@ -139,9 +146,18 @@ func (s *Service) adoptIntegrations(c config.Config, clients map[config.ArrKind]
 	}
 }
 
-func (s *Service) recoveryEvent(kind config.ArrKind, code string) {
-	e := store.Event{Time: s.clock.Now().UTC(), Action: "recovery", Integration: kind, Outcome: "failed", Error: code}
-	if code == "search_completed" {
+func (s *Service) recoveryEvent(job store.RecoveryJob, code string) {
+	e := (store.Event{
+		Time:        s.clock.Now().UTC(),
+		Action:      "recovery",
+		Integration: job.Kind,
+		Outcome:     "failed",
+		Error:       code,
+		ShortHash:   qbt.ShortHash(job.Hash),
+		Name:        job.Name,
+		CommandID:   job.CommandID,
+	}).Bounded()
+	if code == "search_completed" || code == "blocklist_completed" {
 		e.Outcome = "success"
 	}
 	if code == "already_imported" || code == "replacement_queued" || code == "cancelled" || code == "own_search_pending" {
@@ -151,11 +167,11 @@ func (s *Service) recoveryEvent(kind config.ArrKind, code string) {
 	if len(s.state.History) > s.c.HistoryLimit {
 		s.state.History = s.state.History[len(s.state.History)-s.c.HistoryLimit:]
 	}
-	s.log.Info("media recovery outcome", "event", "recovery", "kind", kind, "outcome", code)
+	s.log.Info("media recovery outcome", "event", "recovery", "kind", job.Kind, "outcome", code)
 }
 
 func (s *Service) finishRecovery(job store.RecoveryJob, code string) {
-	s.recoveryEvent(job.Kind, code)
+	s.recoveryEvent(job, code)
 	outcome := s.state.History[len(s.state.History)-1].Outcome
 	s.metrics.RecoveryOutcomes.WithLabelValues(string(job.Kind), string(job.Stage), outcome).Inc()
 	delete(s.state.RecoveryJobs, job.ID)
@@ -195,12 +211,12 @@ func (s *Service) prepareRecovery(t qbt.Torrent, episode store.Episode) {
 			continue
 		}
 		if len(s.state.RecoveryJobs) >= store.MaxRecoveryJobs {
-			s.recoveryEvent(cfg.Kind, "capacity")
+			s.recoveryEvent(store.RecoveryJob{Kind: cfg.Kind}, "capacity")
 			continue
 		}
 		identity := string(cfg.Kind) + cfg.EndpointKey() + t.Hash + string(episode.Policy) + episode.FirstSeen.UTC().Format(time.RFC3339Nano)
 		digest := sha256.Sum256([]byte(identity))
-		job := store.RecoveryJob{ID: hex.EncodeToString(digest[:]), Kind: cfg.Kind, Endpoint: cfg.EndpointKey(), Hash: t.Hash, Policy: episode.Policy, Action: s.c.EffectiveAction(episode.Policy), EpisodeAt: episode.FirstSeen, CapturedAt: now, ExpiresAt: now.Add(store.RecoveryTTL), Mode: mode, Stage: store.Prepared}
+		job := store.RecoveryJob{ID: hex.EncodeToString(digest[:]), Kind: cfg.Kind, Endpoint: cfg.EndpointKey(), Hash: t.Hash, Name: store.BoundedText(t.Name, store.EventTextLimit), Policy: episode.Policy, Action: s.c.EffectiveAction(episode.Policy), EpisodeAt: episode.FirstSeen, CapturedAt: now, ExpiresAt: now.Add(store.RecoveryTTL), Mode: mode, Stage: store.Prepared}
 		if r := s.integrations[cfg.Kind]; r != nil && r.client != nil && !r.queueAt.IsZero() && now.Sub(r.queueAt) >= 0 && now.Sub(r.queueAt) <= queueFreshness {
 			mapped, ok := r.client.Map(r.queue, t.Hash)
 			if ok && !mapped.Truncated && !mapped.Incomplete {
@@ -252,7 +268,7 @@ func (s *Service) recoverySnapshot(now time.Time) ([]IntegrationStatus, []Recove
 	s.metrics.RecoveryPending.Reset()
 	apps := make([]IntegrationStatus, 0, 2)
 	for _, cfg := range s.c.Integrations.Services() {
-		v := IntegrationStatus{Kind: cfg.Kind, Enabled: cfg.Enabled}
+		v := IntegrationStatus{Kind: cfg.Kind, Enabled: cfg.Enabled, Mode: cfg.Mode}
 		if r := s.integrations[cfg.Kind]; r != nil {
 			v.QueueAt, v.Code = r.queueAt, r.code
 			v.Fresh = !r.queueAt.IsZero() && now.Sub(r.queueAt) >= 0 && now.Sub(r.queueAt) <= queueFreshness
@@ -267,7 +283,7 @@ func (s *Service) recoverySnapshot(now time.Time) ([]IntegrationStatus, []Recove
 	jobs := make([]RecoveryStatus, 0, len(s.state.RecoveryJobs))
 	for _, j := range s.state.RecoveryJobs {
 		s.metrics.RecoveryPending.WithLabelValues(string(j.Kind), string(j.Stage)).Inc()
-		jobs = append(jobs, RecoveryStatus{Kind: j.Kind, Stage: j.Stage, Mode: j.Mode, Code: j.LastCode, CapturedAt: j.CapturedAt, ExpiresAt: j.ExpiresAt, NextAt: j.NextAt, Attempts: j.Attempts})
+		jobs = append(jobs, RecoveryStatus{ID: j.ID, Kind: j.Kind, Stage: j.Stage, Mode: j.Mode, Code: j.LastCode, ShortHash: qbt.ShortHash(j.Hash), Policy: j.Policy, CommandID: j.CommandID, CapturedAt: j.CapturedAt, ExpiresAt: j.ExpiresAt, NextAt: j.NextAt, Attempts: j.Attempts})
 	}
 	sort.Slice(jobs, func(i, j int) bool {
 		if jobs[i].Kind != jobs[j].Kind {
@@ -478,13 +494,12 @@ func (s *Service) advanceRecovery(ctx context.Context, r *integrationRuntime, jo
 			}
 			next.QueueIDs, next.MediaIDs = slices.Clone(mapped.ItemIDs), slices.Clone(mapped.MediaIDs)
 		}
-		if job.Mode.Blocklists() {
-			if !found {
-				s.applyRecovery(ctx, r, job, job, "queue_vanished")
-				return
-			}
+		if job.Mode.Blocklists() && found {
 			next.Stage = store.BlocklistPending
-		} else {
+		} else if job.Mode.Searches() {
+			// A vanished queue item in a searching mode is not an abandonment:
+			// blocklisting is moot, but a replacement search may still be
+			// warranted. Recover MediaIDs from history when they are unknown.
 			if len(next.MediaIDs) == 0 {
 				history, err := r.client.History(ctx, job.Hash)
 				if err != nil {
@@ -512,6 +527,11 @@ func (s *Service) advanceRecovery(ctx context.Context, r *integrationRuntime, jo
 				}
 			}
 			next.Stage = store.SearchPending
+		} else {
+			// blocklist_only with a vanished queue item: nothing to blocklist
+			// and nothing to search.
+			s.applyRecovery(ctx, r, job, job, "queue_vanished")
+			return
 		}
 		next.Attempts, next.LastCode = 0, ""
 		s.applyRecovery(ctx, r, job, next, "")
@@ -617,7 +637,14 @@ func (s *Service) mutationResult(r *integrationRuntime, job store.RecoveryJob, c
 	switch outcome {
 	case arr.Accepted:
 		if job.Stage == store.BlocklistIntent {
-			job.Stage, job.Attempts = store.SearchPending, 0
+			if job.Mode.Searches() {
+				job.Stage, job.Attempts = store.SearchPending, 0
+			} else {
+				s.finishRecovery(job, "blocklist_completed")
+				s.persist()
+				s.publish(nil)
+				return
+			}
 		} else if command.ID > 0 {
 			job.Stage, job.CommandID, job.Attempts = store.CommandPending, command.ID, 0
 		} else {

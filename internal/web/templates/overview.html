@@ -1,0 +1,75 @@
+{{define "overview"}}
+<section id="overview" class="panel" aria-labelledby="overview-title">
+    <h2 id="overview-title">Overview</h2>
+    <div class="counters" id="overview-counters" aria-label="Torrent summary" data-refresh="/partials/overview-counters">
+        {{template "overview-counters" .}}
+    </div>
+    <p class="refresh-message" role="status" aria-live="polite">Refreshes automatically. Times use your local timezone.</p>
+</section>
+{{end}}
+
+{{define "overview-counters"}}
+<div class="counter-group">
+    <span class="counter-group-label">Snapshot</span>
+    <div class="counter-items">
+        <div class="stat"><strong>{{.Snapshot.Summary.Total}}</strong><span>Total</span></div>
+        <div class="stat"><strong>{{.Snapshot.Summary.Metadata}}</strong><span>Metadata</span></div>
+        <div class="stat"><strong>{{.Snapshot.Summary.Protected}}</strong><span>Protected</span></div>
+        <div class="stat"><strong>{{.Snapshot.Summary.Overdue}}</strong><span>Overdue</span></div>
+        <div class="stat"><strong>{{.Snapshot.Summary.WouldDelete}}</strong><span>Warned</span></div>
+        <div class="stat"><strong>{{.Snapshot.Summary.DeleteRequested}}</strong><span>Delete requested</span></div>
+    </div>
+</div>
+<div class="counter-group">
+    <span class="counter-group-label">Since startup</span>
+    <div class="counter-items">
+        <div class="stat"><strong>{{.Snapshot.SinceStartup.Deletions}}</strong><span>Confirmed</span></div>
+        <div class="stat"><strong>{{.Snapshot.SinceStartup.WouldDeletions}}</strong><span>Warnings</span></div>
+        <div class="stat"><strong>{{.Snapshot.SinceStartup.DeleteRequests}}</strong><span>Requests</span></div>
+    </div>
+</div>
+<div class="counter-group">
+    <span class="counter-group-label">Lifetime</span>
+    <div class="counter-items">
+        <div class="stat"><strong>{{.Snapshot.Lifetime.Deletions}}</strong><span>Confirmed</span></div>
+        <div class="stat"><strong>{{.Snapshot.Lifetime.WouldDeletions}}</strong><span>Warnings</span></div>
+        <div class="stat"><strong>{{.Snapshot.Lifetime.DeleteRequests}}</strong><span>Requests</span></div>
+    </div>
+</div>
+{{end}}
+
+{{define "overview_toolbar"}}
+<div class="toolbar" role="search" aria-label="Torrent filters">
+    <label for="torrent-search">Filter</label>
+    <input type="search" id="torrent-search" placeholder="Filter torrents by name…" autocomplete="off">
+    <label for="torrent-state">State</label>
+    <select id="torrent-state">
+        <option value="">All states</option>
+        {{range torrentStates .Snapshot}}<option value="{{.}}">{{.}}</option>{{end}}
+    </select>
+</div>
+{{end}}
+
+{{define "recent"}}
+<section id="recent" class="panel" aria-labelledby="recent-title">
+    <div class="section-heading">
+        <h2 id="recent-title">Recent actions</h2>
+        <a href="/activity">View all activity</a>
+    </div>
+    <div class="history-list" id="recent-list" data-refresh="/partials/recent-rows">
+        {{template "recent-rows" .}}
+    </div>
+</section>
+{{end}}
+
+{{define "recent-rows"}}
+{{if .History}}
+{{range $i, $h := .History}}
+{{if lt $i 5}}
+{{template "history_row" $h}}
+{{end}}
+{{end}}
+{{else}}
+<p class="empty">No actions yet.</p>
+{{end}}
+{{end}}
