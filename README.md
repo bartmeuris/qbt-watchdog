@@ -1,6 +1,6 @@
 # qbt-watchdog
 
-A small, stateful daemon that watches qBittorrent for torrents stuck in **Downloading metadata** (`metaDL`), **stalled downloads** (`stalledDL`), completed-looking torrents with no payload, or explicitly tagged stopped Arr-managed torrents across independent policies. It measures continuously observed time, reports overdue torrents in a dashboard, and can remove them after a configurable timeout (or on demand via an authenticated manual action).
+A small, stateful daemon that watches qBittorrent for torrents stuck in **Downloading metadata** (`metaDL`), **stalled downloads** (`stalledDL`), completed-looking torrents with no payload, or explicitly tagged stopped Arr-managed torrents across independent policies. It measures continuously observed time, reports overdue torrents in a web UI, and can remove them after a configurable timeout (or on demand via a manual action from the web UI).
 
 **Start in dry-run mode.** Dry-run is enabled by default and never calls the delete endpoint or writes qBittorrent watchdog tags. Enabling deletion requires the deliberate setting `dry_run: false` in the configuration file. Removal preserves payload files by default; `action: delete_file` can permanently delete downloaded data through qBittorrent and is irreversible.
 
@@ -78,16 +78,16 @@ docker compose up -d --build
 docker compose logs -f qbt-watchdog
 ```
 
-Open **http://127.0.0.1:8090**. Confirm the dashboard says dry-run, qBittorrent versions are detected, polling succeeds, and persistence is healthy. By default, a torrent must be continuously observed matching a policy for 30 minutes before it is marked `would delete`.
+Open **http://127.0.0.1:8090**. Confirm the header shows the dry-run badge and healthy service indicators, qBittorrent versions are detected, polling succeeds, and persistence is healthy. By default, a torrent must be continuously observed matching a policy for 30 minutes before a warning is reported.
 
 The example binds the host UI port to loopback, runs with a read-only root filesystem and all capabilities dropped, and persists `/data` in a named volume. The image prepares `/data` with owner `65532:65532` and mode `0700`; a new normally initialized named volume inherits this. Existing volumes and bind mounts may need ownership correction. Do not use `docker compose down -v` if you intend to retain tracking and action history.
 
 ### 5. Enable deletion only after reviewing dry-run
 
-1. Review overdue torrents, exclusions, and safety guards in the dashboard.
+1. Review overdue torrents, exclusions, and safety guards on the Overview page.
 2. Keep a persistent state volume and confirm readiness is healthy.
 3. Edit `config/config.yaml`: set `dry_run: false` and explicitly set each policy's `action` (e.g. `action: "delete"` or `action: "delete_file"`). Destructive actions require both `dry_run: false` and a selected action; the default `warn` action never removes anything. Remember that `delete_file` removes downloaded data irreversibly.
-4. The file watcher detects the change and applies it automatically; confirm the dashboard now reports active mode.
+4. The file watcher detects the change and applies it automatically; confirm the header now reports active mode.
 
 **Do not enable `action: delete_file` unless you intentionally want qBittorrent to remove payload files, including any shared data affected by its deletion behavior.** The watchdog needs no access to the download filesystem itself.
 
@@ -182,6 +182,8 @@ Usage: qbt-watchdog [--config FILE] [--once]
 The `healthcheck` subcommand has a separate `--url` flag, defaulting to `http://127.0.0.1:8080/healthz`, with no environment equivalent. It accepts only HTTP 200 as healthy. `version` prints build information without requiring qBittorrent configuration.
 
 See [`config.example.yaml`](config.example.yaml) for the complete field reference with documented defaults and inert placeholders. TOML is accepted too (`--config /etc/qbt-watchdog/config.toml`); the key names and values are identical. Unknown keys and values of the wrong type are rejected: the process refuses to start rather than silently ignore a typo.
+
+The same file can be edited from the web UI: the structured Settings page writes only the leaves you change (source-preserving), and a comment-preserving raw editor is available behind the advanced disclosure. Both paths detect a concurrent out-of-band edit with an opaque stamp and reject the save with a 409 rather than overwrite it.
 
 ### Environment substitution and `.env`
 
@@ -369,29 +371,77 @@ History stays inside the state file rather than in a separate rotating log becau
 
 A missing file starts empty. Invalid JSON, unsupported schema, invalid records, or oversized state are preserved as `state.json.<UTC timestamp>.corrupt`, then tracking starts empty with a visible load warning. If the file cannot be read or the corrupt original cannot be preserved, the daemon remains operational but blocks state writes and active deletion until operator intervention and restart. Ordinary write errors degrade readiness and block deletion when the pre-action save fails; successful later saves clear the write error. Review recovered corrupt state in dry-run before returning to active operation.
 
-## Dashboard, endpoints, and security
+## Web interface, endpoints, and security
 
-The web surface uses embedded assets with no CDN, analytics, or frontend build dependencies, and a vendored htmx for partial refreshes with light/dark themes. The dashboard shows all torrents, current policy only, configured versus effective action, observed time/threshold, “Eligible in,” versions, poll/persistence health, recovery health/status, and recent actions. Behind authentication it also exposes a settings editor (comment-preserving YAML editing with conflict detection) and manual actions (`run_now` to accelerate a still-waiting torrent, or `explicit` removal). “Eligible in” is not a guaranteed deletion countdown: the action cap, exclusions, final qBittorrent re-read, persistence, retry budget and dry-run override still apply. Normally downloading torrents outside the closed policy set have no hypothetical classification or timer. Status uses UTC RFC 3339 timestamps and numeric seconds; the browser displays local times. Elapsed time reflects observations, not an independently advancing browser clock.
+The web surface uses embedded assets with no CDN, analytics, or frontend build dependencies, and a vendored htmx plus a small script for partial refreshes with light/dark themes. It is split into four pages, reachable from the header navigation:
 
-| Endpoint                                      | Purpose                                                                                         | Authentication                                                      |
+| Page            | Path        | Shows                                                                  |
+| --------------- | ----------- | ---------------------------------------------------------------------- |
+| Overview        | `/`         | Live counters, torrent search/filter, torrent list, recent actions.    |
+| Active policies | `/policies` | Effective policy table and contextual diagnostics.                     |
+| Activity        | `/activity` | Retained action history and media-recovery progress.                   |
+| Settings        | `/settings` | Structured configuration form and a raw editor.                        |
+
+### Overview
+
+Counters appear in three groups: **Snapshot** (Total, Metadata, Protected, Overdue, Warned, Delete requested), **Since startup**, and **Lifetime** (each with Confirmed, Warnings, Requests). A torrent name search sits beside a fixed state filter that always lists every qBittorrent state with a live count taken from the full snapshot; the counts ignore the name search and the selection survives a refresh. The torrent list is ordered overdue-first, and each row expands in place to show an evaluation gate strip, a one-sentence decision, a metadata line (progress · seeds · peers · category), action progress, a **More details** disclosure (machine values, hash, progress/downloaded/size, speed, category and tags, watchdog tags, added, observed since, elapsed, threshold, attempts, and any policy trace), and **Manual actions**: **Run policy now**, **Remove torrent**, and **Remove torrent and files**. Five recent actions are shown, with a link to Activity. The "next action" wording names the effective action and rough time (for example "Report in ~12m" or "Ready for next poll"); it is not a guaranteed deletion countdown, because the action cap, exclusions, final qBittorrent re-read, persistence, retry budget and dry-run override still apply. Normally downloading torrents outside the closed policy set have no hypothetical classification or timer.
+
+### Active policies
+
+A compact effective-policy table with the columns **Policy · Applies to · Wait · Effective action · Arr behavior · Edit**. The effective action is the one that actually runs after any dry-run downgrade, with a configured note when it differs, and the single reason a policy cannot act (for example "Dry run prevents deletion" or "Action cap is zero"). Warnings are deduplicated by stable code, name the affected policies, and deep-link into Settings; the stopped-Arr policy shows a guide naming its matching tags and the controls that disarm it. **Edit** links to the matching control in Settings.
+
+### Activity
+
+The full retained history, newest first and bounded by `history_limit`, with the columns **Time · Torrent · Policy · Action · Outcome · Service**, a name search, and policy/outcome/service filters applied client-side over the rendered rows. Each entry expands to show its effective action, command ID, error detail, and action timeline. Below it, **Media recovery** lists pending Sonarr/Radarr jobs with stage/outcome, capture time, attempts, and a timeline.
+
+### Settings
+
+The Settings page is a structured, source-preserving form grouped into **General**, **Policies**, **Connections**, **Scope**, **Advanced**, and **Appearance / About**, using real controls (checkboxes, number + unit duration inputs, selects, and comma-separated list inputs). **Save** and **Discard** stay disabled until an edit; an "Unsaved changes" marker appears, and only genuinely changed leaves are sent, so an untouched default is never frozen into the file. A conflict with an out-of-band edit returns 409 and preserves the draft: the form offers a reload link, and the raw editor reports "Configuration changed on disk — reload and retry". Field validation errors are shown inline without discarding the draft. A successful save reports "Saved and applied", or "Saved, but not applied" when only restart-only settings were involved. `listen` and `state_file` are shown read-only with a "Restart required — not applied live" note. The page is fetched once per navigation and never polled, so a live refresh cannot replace a draft. A comment-preserving raw YAML editor remains available behind the **Advanced / raw editor** disclosure. The Connections section's authentication selector (None, Username and password, API key) shows only the credentials that mode can use.
+
+Every secret is edited through a **Source** selector:
+
+- **Value** — a password input; an existing secret shows "Configured", and leaving the field blank keeps the current value.
+- **Env var** — a searchable list of environment variable names, each marked **Missing** or **Empty**; a **Refresh availability** button re-checks them. This stores a `${NAME}` reference rather than the secret itself.
+- **Path** — a server/container file path (the `*_file` key), read by the running process, not the browser.
+
+A **Clear secret** control removes a secret entirely. Prefer **Env var** or **Path** over a plaintext **Value**. Secret values are never returned by the API, the status payload, the metrics, the UI, or any error message.
+
+### Header status and live updates
+
+The header shows a status indicator for qBittorrent and for each Arr integration, with the states **healthy**, **failed**, **stale**, **disabled**, and **unknown** (missing information is "unknown"; "enabled" is never conflated with "connected"). Hovering, focusing, or tapping an indicator opens a popover with its status, last contact, latest error, and latest action. A mode badge reads **Dry run enabled**, **Dry run disabled** (linking to the dry-run setting), or **Report only** when no policy has a destructive effective action.
+
+Live data is refreshed by one shared coordinator rather than whole-page reloads. Each live fragment is reconciled by stable `data-key` identity, so expansion state, focus, text selection, service popovers, manual-action feedback, and scroll position survive a refresh, and the torrent list is never reshuffled by a threshold crossing. A refresh is suppressed entirely when the snapshot has not advanced (the server answers 204) or the fragment HTML is unchanged. If a fetch fails, the last good content is kept but marked **stale** (a dashed outline) and cleared as soon as a poll succeeds again; a backend outage never blanks an already-rendered fragment. Status uses UTC RFC 3339 timestamps and numeric seconds; the browser displays local times. Elapsed time reflects observations, not an independently advancing browser clock.
+
+The server has no built-in authentication. Every endpoint below is served to anyone who can reach `listen`; deploy behind a reverse proxy that terminates TLS and enforces access control.
+
+| Endpoint                                      | Purpose                                                                                         | Protection                                                          |
 | --------------------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `GET /`                                       | Auto-refreshing dashboard (HTMX server-rendered).                                               | Basic Auth when configured.                                         |
-| `GET /api/v1/status`                          | Schema-versioned in-memory snapshot; no qBittorrent request.                                    | Basic Auth when configured.                                         |
-| `GET /api/v1/config`                          | Raw configuration document plus an opaque stamp for the settings editor.                        | Basic Auth when configured.                                         |
-| `POST /api/v1/config`                         | Save an edited configuration; preserves comments; conflicts return 409.                         | Auth + same-origin CSRF required.                                   |
-| `POST /api/v1/actions`                        | Queue a manual action (`run_now` / `explicit`) by short hash; 202, executed by the next poll.   | Auth + same-origin CSRF required.                                   |
+| `GET /`                                       | Overview page (counters, torrent search/filter, torrent list, recent actions).                  | None (see reverse proxy below).                                     |
+| `GET /policies`                               | Active policies page (effective-policy table, diagnostics).                                     | None (see reverse proxy below).                                     |
+| `GET /activity`                               | Activity page (retained history and media recovery).                                            | None (see reverse proxy below).                                     |
+| `GET /settings`                               | Structured Settings page; fetched once per navigation, never polled.                            | None (see reverse proxy below).                                     |
+| `GET /partials/...`                           | Server-rendered HTML fragments: full sections (`overview`, `policies`, `torrents`, `history`, `recovery`, `recent`, `settings`), header `services`, the raw `settings-editor`, and the live inner fragments polled during refresh (`*-rows`, `*-counters`, `policy-items`). | None (see reverse proxy below).                                     |
+| `GET /api/v1/status`                          | Schema-versioned in-memory snapshot; no qBittorrent request.                                    | None (see reverse proxy below).                                     |
+| `GET /api/v1/config`                          | Raw configuration document plus an opaque stamp for the raw editor.                             | None (see reverse proxy below).                                     |
+| `POST /api/v1/config`                         | Save a raw-edited configuration; preserves comments; conflicts return 409.                      | Same-origin CSRF required.                                          |
+| `GET /api/v1/settings`                        | Structured settings read model (typed values, sources and secret metadata; never secret values). | None (see reverse proxy below).                                     |
+| `GET /api/v1/settings/environment`            | Environment variable names with availability/empty markers for the secret picker.               | None (see reverse proxy below).                                     |
+| `POST /api/v1/settings`                       | Apply a structured settings patch; field errors return 422, conflicts 409.                      | Same-origin CSRF required.                                          |
+| `POST /api/v1/actions`                        | Queue a manual action (`run_now` / `explicit`) by short hash; 202, executed by the next poll.   | Same-origin CSRF required.                                          |
 | `GET /healthz`                                | HTTP 200 when the HTTP server is alive, independent of qBittorrent.                             | Always public.                                                      |
 | `GET /readyz`                                 | HTTP 200 after a successful, recent poll with healthy persistence; otherwise 503 with a reason. | Always public.                                                      |
-| `GET /metrics`                                | Prometheus/OpenMetrics exposition.                                                              | Public by default; follows Basic Auth when `metrics_public: false`. |
+| `GET /metrics`                                | Prometheus/OpenMetrics exposition.                                                              | Always public; protect it at the reverse proxy if needed.           |
 | `GET /assets/app.js`, `GET /assets/style.css`, `GET /assets/htmx.min.js` | Embedded static assets, without torrent data.                             | Public.                                                             |
 
 Readiness follows the age of the last successful poll, not simply the latest `qbt_up` value: it can remain ready briefly after a poll failure. A rejected configuration reload degrades readiness deliberately. Recovery health/status is separate from core readiness; a stale Sonarr/Radarr queue does not by itself make `/readyz` fail. Docker's built-in healthcheck tests **liveness**, not readiness. If you change the internal listen port, update or override the image healthcheck too.
 
-Configure both `web_username` and `web_password` (or `web_password_file`) to protect the dashboard, status API, and the settings/manual-action endpoints. The mutation endpoints (`POST /api/v1/config` and `POST /api/v1/actions`) additionally require the same-origin CSRF check and refuse to run without web credentials. To protect metrics as well, set `metrics_public: false`; that setting alone does not enable authentication if no web credentials exist. The supplied Compose file does not configure web authentication. Its loopback host binding does not prevent access from other containers on the shared network.
+Built-in web authentication was removed. The mutation endpoints (`POST /api/v1/config`, `POST /api/v1/settings`, and `POST /api/v1/actions`) require the same-origin CSRF check — an `HX-Request` header, a `Sec-Fetch-Site` of `same-origin`/`none`, and an `Origin` host matching the request host — but they do not require a built-in username. Access control is the reverse proxy's job: require authentication there for every path you want to protect, including `/metrics` (which is always served without credentials by the watchdog itself). The supplied Compose file does not configure authentication; its loopback host binding does not prevent access from other containers on the shared network.
 
-The HTTP server has no built-in TLS listener. Keep it on trusted networks or behind a TLS-terminating reverse proxy; Basic Auth over plain HTTP does not encrypt credentials. Do not expose it directly to the internet. Response hardening includes a restrictive CSP, framing denial, no-referrer and nosniff headers, server timeouts, and bounded headers. UI/status responses disable caching. Torrent-controlled text is escaped and rendered without HTML injection. Logs and public status use short hashes, but the dashboard/status intentionally expose names, categories, and tags.
+A configuration file that still carries the former built-in web-auth keys `web_username`, `web_password`, `web_password_file`, or `metrics_public` is rejected at startup and on reload with a migration error naming the keys to delete ("built-in web authentication was removed; delete … and enforce access control with a reverse proxy"). Remove those keys and configure authentication at the reverse proxy instead.
 
-For qBittorrent HTTPS, the image includes system CA certificates; mount a PEM bundle read-only and set `tls_ca_file` for a private CA. That option configures the outbound client, not HTTPS for the dashboard.
+The HTTP server has no built-in TLS listener. Keep it on trusted networks or behind a TLS-terminating reverse proxy. Do not expose it directly to the internet. Response hardening includes a restrictive CSP, framing denial, no-referrer and nosniff headers, server timeouts, and bounded headers. UI/status responses disable caching. Torrent-controlled text is escaped and rendered without HTML injection. Logs and public status use short hashes, but the UI/status intentionally expose names, categories, and tags.
+
+For qBittorrent HTTPS, the image includes system CA certificates; mount a PEM bundle read-only and set `tls_ca_file` for a private CA. That option configures the outbound client, not HTTPS for the UI.
 
 ### Prometheus
 
@@ -405,7 +455,7 @@ scrape_configs:
       - targets: ['qbt-watchdog:8080']
 ```
 
-A Prometheus process running directly on the Docker host can instead target `127.0.0.1:8090`. If metrics are protected, add `basic_auth` with the configured web username and a `password_file` readable by Prometheus; use HTTPS through your proxy across untrusted networks.
+A Prometheus process running directly on the Docker host can instead target `127.0.0.1:8090`. `/metrics` is always served without credentials by the watchdog, so if the exposition must stay private, protect that path at the reverse proxy (and use HTTPS across untrusted networks).
 
 Metrics include:
 

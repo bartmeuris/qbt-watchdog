@@ -104,7 +104,7 @@ func TestEnvironmentExpansionPreservesStrictBoundary(t *testing.T) {
 
 func TestEnvironmentEmptyCredentialsCannotEnableBypass(t *testing.T) {
 	t.Parallel()
-	for _, key := range []string{"qbt_username", "qbt_password", "qbt_password_file", "qbt_api_key", "qbt_api_key_file", "web_username", "web_password", "web_password_file"} {
+	for _, key := range []string{"qbt_username", "qbt_password", "qbt_password_file", "qbt_api_key", "qbt_api_key_file"} {
 		if _, err := DecodeWithEnvironment(YAML, []byte(minimal+key+": '${EMPTY}'\n"), map[string]string{"EMPTY": ""}); err == nil {
 			t.Fatal("empty referenced credential silently enabled bypass", key)
 		}
@@ -123,16 +123,13 @@ func TestEnvironmentEmptyCredentialsCannotEnableBypass(t *testing.T) {
 func TestEnvironmentSecretFilesAndAuthenticationConflicts(t *testing.T) {
 	t.Parallel()
 	keyPath := writeFile(t, "key", "SECRET_${LITERAL}$$#value\n")
-	for _, source := range []string{"qbt_api_key_file", "qbt_password_file", "web_password_file"} {
+	for _, source := range []string{"qbt_api_key_file", "qbt_password_file"} {
 		body := minimal + source + ": '${FILE}'\n"
 		if source == "qbt_password_file" {
 			body += "qbt_username: user\n"
 		}
-		if source == "web_password_file" {
-			body += "web_username: user\n"
-		}
 		c, err := DecodeWithEnvironment(YAML, []byte(body), map[string]string{"FILE": keyPath})
-		if err != nil || c.APIKey+c.Password+c.WebPassword != "SECRET_${LITERAL}$$#value" {
+		if err != nil || c.APIKey+c.Password != "SECRET_${LITERAL}$$#value" {
 			t.Fatal("secret-file mode changed or contents expanded", err)
 		}
 	}

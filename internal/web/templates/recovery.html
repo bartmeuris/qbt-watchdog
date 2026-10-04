@@ -9,18 +9,18 @@
     <div class="list-head" aria-hidden="true">
         <span>Service / mode</span><span>Stage / outcome</span><span>Captured</span><span>Attempts</span>
     </div>
-    <div class="recovery-list" id="recovery-list" data-refresh="/partials/recovery-rows">
+    <div class="recovery-list" id="recovery-list" data-refresh="/partials/recovery-rows" data-live-order="keep">
         {{template "recovery-rows" .}}
     </div>
 </section>
 {{end}}
 
 {{define "recovery-rows"}}
-{{range .Recovery}}{{template "recovery_row" .}}{{else}}<p class="empty">No pending recovery jobs.</p>{{end}}
+{{range .Recovery}}{{template "recovery_row" .}}{{else}}<p class="empty" data-key="empty">No pending recovery jobs.</p>{{end}}
 {{end}}
 
 {{define "recovery_row"}}
-<details class="recovery" id="recovery-{{.Job.ID}}" data-recovery="{{.Job.ID}}">
+<details class="recovery" id="recovery-{{.Job.ID}}" data-key="recovery-{{.Job.ID}}" data-recovery="{{.Job.ID}}">
     <summary>
         <span class="t-torrent">
             <span class="t-name">{{kindLabel .Job.Kind}}</span>

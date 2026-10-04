@@ -1,22 +1,262 @@
 {{define "settings"}}
 <section id="settings" class="panel status" aria-labelledby="settings-title">
-    <h2 id="settings-title">Settings</h2>
-    <p class="caveat">Effective configuration below. Editing is available at the bottom of this panel.</p>
-    <dl class="facts">
-        <dt>Dry run</dt><dd>{{if .Snapshot.DryRun}}enabled{{else}}disabled{{end}}</dd>
-        <dt>Tag sync</dt><dd>{{if .Snapshot.TagSync.Enabled}}enabled · prefix {{.Snapshot.TagSync.Prefix}}{{else}}disabled{{end}}</dd>
-        <dt>Action cap per poll</dt><dd>{{.Snapshot.Limits.MaxActionsPerPoll}}</dd>
-        <dt>Observation gap</dt><dd>{{duration .Snapshot.Limits.MaxObservationGapSeconds}}</dd>
-        <dt>Delete confirmation timeout</dt><dd>{{duration .Snapshot.Limits.DeleteConfirmationTimeoutSeconds}}</dd>
-        <dt>History limit</dt><dd>{{.Snapshot.Limits.HistoryLimit}}</dd>
-    </dl>
-    {{if .Snapshot.Exclusions.IncludeCategories}}<h3>Include categories</h3><p>{{join .Snapshot.Exclusions.IncludeCategories}}</p>{{end}}
-    {{if .Snapshot.Exclusions.ExcludeCategories}}<h3>Exclude categories</h3><p>{{join .Snapshot.Exclusions.ExcludeCategories}}</p>{{end}}
-    {{if .Snapshot.Exclusions.ExcludeTags}}<h3>Exclude tags</h3><p>{{join .Snapshot.Exclusions.ExcludeTags}}</p>{{end}}
-    <p class="warning">Changing policy, interval, or dry-run settings resets observation timers. <code>listen</code> and <code>state_file</code> require a restart.</p>
-    <div id="settings-editor" hx-get="/partials/settings-editor" hx-trigger="load" hx-swap="innerHTML"></div>
-    <div id="settings-status" role="status" aria-live="polite"></div>
+    <div class="section-heading">
+        <h2 id="settings-title">Settings</h2>
+        <p>Structured configuration · source-preserving</p>
+    </div>
+    {{if .Settings}}
+    <nav class="settings-nav" aria-label="Settings sections">
+        <a href="#general">General</a>
+        <a href="#policies">Policies</a>
+        <a href="#connections">Connections</a>
+        <a href="#scope">Scope</a>
+        <a href="#advanced">Advanced</a>
+        <a href="#appearance">Appearance / About</a>
+    </nav>
+    <p class="caveat">Changing policy, interval, or dry-run settings resets observation timers. <code>listen</code> and <code>state_file</code> require a restart and are shown read-only.</p>
+    <form id="settings-form" class="settings-form" hx-post="/api/v1/settings" hx-swap="none">
+        <input type="hidden" name="stamp" value="{{.Settings.Stamp}}">
+        <div class="settings-actions">
+            <button type="submit" id="settings-save" disabled>Save</button>
+            <button type="button" id="settings-discard" disabled>Discard</button>
+            <span id="settings-dirty" class="settings-dirty" hidden>Unsaved changes</span>
+        </div>
+        <div id="settings-status" class="settings-status" role="status" aria-live="polite"></div>
+
+        <section id="general" class="settings-section" aria-labelledby="general-title">
+            <h3 id="general-title">General</h3>
+            <div class="settings-grid">
+                {{template "field_bool" (boolField "dry_run" "Dry run" "When enabled, actions are reported but never performed." .Settings.General.DryRun false)}}
+                {{template "field_int" (intField "max_actions_per_poll" "Action cap per poll" "Maximum destructive actions in one poll." .Settings.General.MaxActionsPerPoll false)}}
+                {{template "field_duration" (durationField "poll_interval" "Poll interval" "How often qBittorrent is polled." .Settings.General.PollInterval false)}}
+                {{template "field_duration" (durationField "ui_refresh_interval" "UI refresh interval" "How often the live dashboard fragments refresh." .Settings.General.UIRefreshInterval false)}}
+                {{template "field_int" (intField "history_limit" "History retention" "Number of audit events kept." .Settings.General.HistoryLimit false)}}
+            </div>
+        </section>
+
+        <section id="policies" class="settings-section" aria-labelledby="policies-title">
+            <h3 id="policies-title">Policies</h3>
+            {{range $id := policyIDs}}
+            {{$policy := index $.Settings.Policies (printf "%s" $id)}}
+            <details class="settings-policy" id="policy-{{$id}}">
+                <summary>
+                    <span class="p-name">{{policyLabel $id}}</span>
+                    <code class="p-id">{{$id}}</code>
+                </summary>
+                <p class="setting-help">{{policyDescription $id}}</p>
+                <div class="settings-grid">
+                    {{template "field_select" (withAnchor (selectField (printf "policy.%s.action" $id) "Action" "What happens once the threshold elapses." $policy.Action (actionOptionsView) false) (printf "policy-%s-action" $id))}}
+                    {{template "field_duration" (withAnchor (durationField (printf "policy.%s.threshold" $id) "Threshold" "How long a torrent may stay in this policy before acting." $policy.ThresholdSeconds false) (printf "policy-%s-threshold" $id))}}
+                    {{template "field_select" (withAnchor (selectField (printf "policy.%s.arr_mode" $id) "Arr behavior" "How the media manager is asked to recover the release." $policy.ArrMode (policyArrModeOptionsView) false) (printf "policy-%s-arr" $id))}}
+                    {{template "field_list" (withAnchor (listField (printf "policy.%s.match_tags" $id) "Match tags" "Comma-separated tags that select this policy." $policy.MatchTags false) (printf "policy-%s-match-tags" $id))}}
+                </div>
+                {{if eq (printf "%s" $id) "stopped_arr_managed"}}
+                {{with stoppedPolicyWarning $.Snapshot}}{{template "policy-guide" .}}{{end}}
+                {{end}}
+            </details>
+            {{end}}
+        </section>
+
+        <section id="connections" class="settings-section" aria-labelledby="connections-title">
+            <h3 id="connections-title">Connections</h3>
+            <h4>qBittorrent</h4>
+            <div class="settings-grid">
+                {{template "field_text" (textField "qbt_url" "Endpoint" "Base URL of the qBittorrent Web API." .Settings.Connections.QBTURL false)}}
+                {{template "field_select" (selectField "qbt_auth_mode" "Authentication" "How the watchdog authenticates to qBittorrent." .Settings.Connections.QBTAuthMode (authModeOptionsView) false)}}
+                <div class="auth-field" data-auth-mode="password">{{template "field_text" (textField "qbt_username" "Username" "Used only in username/password mode." .Settings.Connections.QBTUsername false)}}</div>
+            </div>
+            <div class="secret-list">
+                <div class="auth-field" data-auth-mode="api_key">{{template "secret_control" (secretFieldView "qbt_api_key" "qBittorrent API key" "Used in API key mode." (secretFor .Settings.Secrets "qbt_api_key") .Settings.Environment)}}</div>
+                <div class="auth-field" data-auth-mode="password">{{template "secret_control" (secretFieldView "qbt_password" "qBittorrent password" "Used in username/password mode." (secretFor .Settings.Secrets "qbt_password") .Settings.Environment)}}</div>
+            </div>
+            {{range $kind := arrKinds}}
+            {{$arr := index $.Settings.Connections.Arr (printf "%s" $kind)}}
+            <h4>{{kindLabel $kind}}</h4>
+            <div class="settings-grid">
+                {{template "field_bool" (boolField (printf "integration.%s.enabled" $kind) "Enabled" "Enable recovery through this media manager." $arr.Enabled false)}}
+                {{template "field_text" (textField (printf "integration.%s.url" $kind) "Endpoint" "Base URL of the media manager." $arr.URL false)}}
+                {{template "field_select" (selectField (printf "integration.%s.mode" $kind) "Mode" "Default recovery behavior for policies that inherit." $arr.Mode (arrModeOptionsView) false)}}
+                {{template "field_duration" (durationField (printf "integration.%s.timeout" $kind) "Timeout" "Per-request timeout." $arr.Timeout false)}}
+                {{template "field_list" (listField (printf "integration.%s.categories" $kind) "Categories" "Comma-separated categories this manager owns." $arr.Categories false)}}
+            </div>
+            {{template "secret_control" (secretFieldView (printf "integrations.%s.api_key" $kind) (printf "%s API key" (kindLabel $kind)) "Credential for this media manager." (secretFor $.Settings.Secrets (printf "integrations.%s.api_key" $kind)) $.Settings.Environment)}}
+            {{end}}
+        </section>
+
+        <section id="scope" class="settings-section" aria-labelledby="scope-title">
+            <h3 id="scope-title">Scope</h3>
+            <div class="settings-grid">
+                {{template "field_list" (listField "include_categories" "Included categories" "Only torrents in these categories are considered." .Settings.Scope.IncludeCategories false)}}
+                {{template "field_list" (listField "exclude_categories" "Excluded categories" "Torrents in these categories are ignored." .Settings.Scope.ExcludeCategories false)}}
+                {{template "field_list" (listField "exclude_tags" "Excluded tags" "Torrents carrying any of these tags are ignored." .Settings.Scope.ExcludeTags false)}}
+            </div>
+        </section>
+
+        <section id="advanced" class="settings-section" aria-labelledby="advanced-title">
+            <h3 id="advanced-title">Advanced</h3>
+            <div class="settings-grid">
+                {{template "field_duration" (durationField "max_observation_gap" "Max observation gap" "A gap longer than this interrupts an observation episode." .Settings.Advanced.MaxObservationGap false)}}
+                {{template "field_duration" (durationField "delete_confirmation_timeout" "Delete confirmation timeout" "How long to wait for a delete to be confirmed." .Settings.Advanced.DeleteConfirmationTimeout false)}}
+                {{template "field_duration" (durationField "http_timeout" "HTTP timeout" "Default HTTP client timeout." .Settings.Advanced.HTTPTimeout false)}}
+                {{template "field_duration" (durationField "readiness_max_age" "Readiness max age" "A poll older than this marks the process not ready." .Settings.Advanced.ReadinessMaxAge false)}}
+                {{template "field_bool" (boolField "tag_sync_enabled" "Tag sync" "Write watchdog tags back to qBittorrent." .Settings.Advanced.TagSyncEnabled false)}}
+                {{template "field_text" (textField "tag_sync_prefix" "Tag prefix" "Prefix for tags written back." .Settings.Advanced.TagSyncPrefix false)}}
+                {{template "field_int" (intField "tag_sync_max_writes_per_poll" "Tag writes per poll" "Cap on tag writes in one poll." .Settings.Advanced.TagSyncMaxWritesPerPoll false)}}
+                {{template "field_bool" (boolField "tls_insecure_skip_verify" "Skip TLS verification" "Disable certificate verification (not recommended)." .Settings.Advanced.TLSInsecure false)}}
+                {{template "field_text" (textField "tls_ca_file" "TLS CA file" "Path to a CA bundle read by the server." .Settings.Advanced.TLSCAFile false)}}
+                {{template "field_select" (selectField "log_level" "Log level" "Minimum severity that is logged." .Settings.Advanced.LogLevel (stringOptions (logLevelOptions)) false)}}
+                {{template "field_select" (selectField "log_format" "Log format" "Structured or human-readable logs." .Settings.Advanced.LogFormat (stringOptions (logFormatOptions)) false)}}
+                {{template "field_select" (selectField "log_color" "Log color" "Colorize console logs." .Settings.Advanced.LogColor (stringOptions (logColorOptions)) false)}}
+                {{template "field_text" (textField "state_file" "State file" "On-disk episode store." .Settings.Advanced.StateFile true)}}
+                {{template "field_text" (textField "listen" "Listen address" "Socket the web server binds." .Settings.Advanced.Listen true)}}
+            </div>
+        </section>
+
+        <section id="appearance" class="settings-section" aria-labelledby="appearance-title">
+            <h3 id="appearance-title">Appearance / About</h3>
+            <div class="setting-field">
+                <span class="setting-label">Theme</span>
+                <button type="button" id="theme-toggle" class="theme-toggle"><span class="theme-follow">Theme: auto</span></button>
+                <p class="setting-help">Stored in this browser only; it never changes the server configuration.</p>
+            </div>
+            <dl class="facts">
+                <dt>Version</dt><dd>{{dash .Snapshot.Build.Version}}</dd>
+                <dt>Revision</dt><dd>{{dash .Snapshot.Build.Revision}}</dd>
+                <dt>Build date</dt><dd>{{dash .Snapshot.Build.Date}}</dd>
+                <dt>Go version</dt><dd>{{dash .Snapshot.Build.GoVersion}}</dd>
+            </dl>
+        </section>
+    </form>
+    {{else}}
+    <p class="caveat">{{.SettingsError}}</p>
+    {{end}}
+    <details class="settings-raw">
+        <summary>Advanced / raw editor</summary>
+        <div id="settings-editor" hx-get="/partials/settings-editor" hx-trigger="toggle once from:closest details" hx-swap="innerHTML"></div>
+    </details>
 </section>
+{{end}}
+
+{{define "field_meta"}}
+{{if .Help}}<p class="setting-help">{{.Help}}</p>{{end}}
+{{if .Restart}}<p class="setting-restart">Restart required — not applied live.</p>{{end}}
+{{if .Error}}<p class="setting-error" role="alert">{{.Error}}</p>{{end}}
+{{if ne (sourceLabel .Source) "explicit"}}<span class="setting-source">{{sourceLabel .Source}}</span>{{end}}
+{{end}}
+
+{{define "field_bool"}}
+<div class="setting-field" id="{{.Anchor}}">
+    <label class="setting-label">
+        <input type="hidden" name="{{.Name}}" value="false">
+        <input type="checkbox" name="{{.Name}}" value="true"{{if .Bool}} checked{{end}}{{if .Restart}} disabled{{end}}>
+        <span>{{.Label}}</span>
+    </label>
+    {{template "field_meta" .}}
+</div>
+{{end}}
+
+{{define "field_int"}}
+<div class="setting-field" id="{{.Anchor}}">
+    <label class="setting-label" for="{{.Name}}">{{.Label}}</label>
+    <input type="number" id="{{.Name}}" name="{{.Name}}" value="{{.Int}}"{{if .Restart}} disabled{{end}}>
+    {{template "field_meta" .}}
+</div>
+{{end}}
+
+{{define "field_duration"}}
+<div class="setting-field" id="{{.Anchor}}">
+    <label class="setting-label" for="{{.Name}}_value">{{.Label}}</label>
+    {{if .Duration.Simple}}
+    <span class="duration-input">
+        <input type="number" id="{{.Name}}_value" name="{{.Name}}_value" value="{{.Duration.Value}}" min="0"{{if .Restart}} disabled{{end}}>
+        <select name="{{.Name}}_unit"{{if .Restart}} disabled{{end}}>
+            <option value="s"{{if eq .Duration.Unit "s"}} selected{{end}}>seconds</option>
+            <option value="m"{{if eq .Duration.Unit "m"}} selected{{end}}>minutes</option>
+            <option value="h"{{if eq .Duration.Unit "h"}} selected{{end}}>hours</option>
+        </select>
+    </span>
+    {{else}}
+    <input type="text" id="{{.Name}}_raw" name="{{.Name}}_raw" value="{{.Duration.Raw}}"{{if .Restart}} disabled{{end}}>
+    {{end}}
+    {{template "field_meta" .}}
+</div>
+{{end}}
+
+{{define "field_text"}}
+<div class="setting-field" id="{{.Anchor}}">
+    <label class="setting-label" for="{{.Name}}">{{.Label}}</label>
+    <input type="text" id="{{.Name}}" name="{{.Name}}" value="{{.Text}}"{{if .Restart}} disabled{{end}}>
+    {{template "field_meta" .}}
+</div>
+{{end}}
+
+{{define "field_list"}}
+<div class="setting-field" id="{{.Anchor}}">
+    <label class="setting-label" for="{{.Name}}">{{.Label}}</label>
+    <input type="text" id="{{.Name}}" name="{{.Name}}" value="{{.List}}" placeholder="comma separated"{{if .Restart}} disabled{{end}}>
+    {{template "field_meta" .}}
+</div>
+{{end}}
+
+{{define "field_select"}}
+{{$field := .}}
+<div class="setting-field" id="{{.Anchor}}">
+    <label class="setting-label" for="{{.Name}}">{{.Label}}</label>
+    <select id="{{.Name}}" name="{{.Name}}"{{if .Restart}} disabled{{end}}>
+        {{range .Options}}<option value="{{.Value}}"{{if eq .Value $field.Selected}} selected{{end}}>{{.Label}}</option>{{end}}
+    </select>
+    {{template "field_meta" .}}
+</div>
+{{end}}
+
+{{define "secret_control"}}
+{{$secret := .}}
+<div class="secret-control" id="secret-{{.Key}}" data-secret-key="{{.Key}}" data-original-source="{{secretSourceLabel .Source}}" data-active-type="{{.ActiveType}}">
+    <div class="secret-head">
+        <span class="secret-label">{{.Label}}</span>
+        {{if .Configured}}<span class="secret-configured">Configured</span>{{else}}<span class="secret-unset">Not configured</span>{{end}}
+    </div>
+    {{if .Help}}<p class="setting-help">{{.Help}}</p>{{end}}
+    <label class="setting-label" for="secret-{{.Key}}-type">Source</label>
+    <select id="secret-{{.Key}}-type" name="secret.{{.Key}}.type" class="secret-type">
+        {{range secretTypeOptions}}<option value="{{.}}"{{if eq . $secret.ActiveType}} selected{{end}}>{{secretTypeLabel .}}</option>{{end}}
+    </select>
+
+    <div class="secret-field secret-field-value" data-secret-field="value">
+        {{if eq (secretSourceLabel .Source) "value"}}<p class="secret-existing">Configured — enter a new value to replace it.</p>{{end}}
+        <label class="setting-label" for="secret-{{.Key}}-value">Value</label>
+        <input type="password" id="secret-{{.Key}}-value" name="secret.{{.Key}}.value" value="" autocomplete="new-password" placeholder="{{if eq (secretSourceLabel .Source) "value"}}Leave blank to keep the current value{{else}}Enter a value{{end}}">
+    </div>
+
+    <div class="secret-field secret-field-env" data-secret-field="env">
+        <label class="setting-label" for="secret-{{.Key}}-env-search">Environment variable</label>
+        <div class="env-combo" data-env-combo>
+            <input type="text" id="secret-{{.Key}}-env-search" class="env-search" value="{{.EnvName}}" placeholder="Search variable names…" autocomplete="off">
+            <ul class="env-options" role="listbox" aria-label="Environment variables">
+                {{range .Environment}}
+                <li role="option" class="env-option{{if not .Available}} env-missing{{else if .Empty}} env-empty{{end}}" data-name="{{.Name}}" data-available="{{.Available}}" data-empty="{{.Empty}}" aria-selected="{{if eq .Name $secret.EnvName}}true{{else}}false{{end}}">
+                    <span class="env-name">{{.Name}}</span>
+                    {{if not .Available}}<span class="env-marker">Missing</span>{{else if .Empty}}<span class="env-marker">Empty</span>{{end}}
+                </li>
+                {{end}}
+            </ul>
+            <input type="hidden" name="secret.{{.Key}}.env" value="{{.EnvName}}">
+        </div>
+        <button type="button" class="env-refresh" data-env-refresh>Refresh availability</button>
+    </div>
+
+    <div class="secret-field secret-field-path" data-secret-field="path">
+        <label class="setting-label" for="secret-{{.Key}}-path">Path</label>
+        <input type="text" id="secret-{{.Key}}-path" name="secret.{{.Key}}.path" value="{{.Path}}" placeholder="/run/secrets/…">
+        <p class="setting-help">The path is read by the running server/container, not your browser.</p>
+    </div>
+
+    <label class="secret-clear">
+        <input type="checkbox" name="secret.{{.Key}}.clear" value="true">
+        <span>Clear secret</span>
+    </label>
+    {{if .Error}}<p class="setting-error" role="alert">{{.Error}}</p>{{end}}
+</div>
 {{end}}
 
 {{define "settings-editor"}}

@@ -11,11 +11,22 @@
 {{end}}
 
 {{define "policy-items"}}
-{{range warningGroups .Snapshot.Warnings}}
-<p class="warning">{{.Message}}{{if .Policies}} <span class="warning-policies">· affects {{policyNames .Policies}}</span>{{end}}</p>
+{{$diagnostics := diagnosticWarnings .Snapshot.Warnings}}
+{{if $diagnostics}}
+<details class="diagnostics" data-key="diagnostics">
+    <summary>{{len $diagnostics}} global diagnostic{{if ne (len $diagnostics) 1}}s{{end}}</summary>
+    <div class="diagnostics-list">
+        {{range $diagnostics}}
+        <p class="warning" data-warning-code="{{.Code}}">
+            {{.Message}}{{if .Tags}} <span class="warning-tags">· {{join .Tags}}</span>{{end}}{{if .Policies}} <span class="warning-policies">· affects {{policyNames .Policies}}</span>{{end}}
+            {{if .Target}}<a class="warning-target" href="/settings#{{.Target}}">Open settings</a>{{end}}
+        </p>
+        {{end}}
+    </div>
+</details>
 {{end}}
-<div class="policy-table" role="table" aria-label="Effective policies">
-    <div class="policy-head" role="row" aria-hidden="true">
+<div class="policy-table" role="table" aria-label="Effective policies" data-key="policy-table">
+    <div class="policy-head" role="row" aria-hidden="true" data-key="policy-head">
         <span role="columnheader">Policy</span>
         <span role="columnheader">Applies to</span>
         <span role="columnheader">Wait</span>
@@ -24,7 +35,7 @@
         <span role="columnheader">Edit</span>
     </div>
     {{range policyRows .Snapshot}}
-    <div class="policy-row" role="row" id="policy-{{.ID}}">
+    <div class="policy-row" role="row" id="policy-{{.ID}}" data-key="policy-{{.ID}}">
         <div class="policy-cell policy-name" role="cell">
             <span class="p-name">{{.Label}}</span>
             <code class="p-id">{{.ID}}</code>
@@ -35,8 +46,8 @@
         </div>
         <div class="policy-cell policy-wait" role="cell">{{.Threshold}}</div>
         <div class="policy-cell policy-action" role="cell">
-            <span class="p-effective">{{actionVerb .EffectiveAction}}</span>
-            {{if .DryRunOverride}}<span class="p-configured">configured: {{actionVerb .ConfiguredAction}}</span>{{end}}
+            <a class="p-effective{{if .Destructive}} p-destructive{{end}}" href="/settings#{{.ActionAnchor}}">{{actionLabel .EffectiveAction}}</a>
+            {{if .DryRunOverride}}<span class="p-configured">configured, not executed while dry run is on: {{actionLabel .ConfiguredAction}}</span>{{end}}
             {{if .BlockedReason}}<span class="p-blocked">{{.BlockedReason}}</span>{{end}}
         </div>
         <div class="policy-cell policy-arr" role="cell">
@@ -47,6 +58,21 @@
             <a href="/settings#policy-{{.ID}}">Edit</a>
         </div>
     </div>
+    {{if eq (printf "%s" .ID) "stopped_arr_managed"}}
+    {{with stoppedPolicyWarning $.Snapshot}}
+    <div class="policy-warning" data-key="stopped-policy-warning" data-warning-code="stopped_policy_armed">{{template "policy-guide" .}}</div>
     {{end}}
+    {{end}}
+    {{end}}
+</div>
+{{end}}
+
+{{define "policy-guide"}}
+<div class="policy-guide">
+    <p class="policy-guide-text">{{.Message}}</p>
+    {{if .Tags}}<p class="policy-guide-tags">Matching tags: <strong>{{join .Tags}}</strong></p>{{end}}
+    <ul class="policy-guide-links">
+        {{range .Links}}<li><a href="{{.Href}}">{{.Label}}</a> — {{.Body}}</li>{{end}}
+    </ul>
 </div>
 {{end}}

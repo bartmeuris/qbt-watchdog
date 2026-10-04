@@ -1,6 +1,7 @@
 package web
 
 import (
+	"slices"
 	"strings"
 
 	"qbt-watchdog/internal/config"
@@ -24,6 +25,8 @@ type policyRow struct {
 	ConfiguredAction config.Action
 	EffectiveAction  config.Action
 	DryRunOverride   bool
+	Destructive      bool
+	ActionAnchor     string
 	ArrSummary       string
 	ArrDetails       []arrBehavior
 	BlockedReason    string
@@ -56,6 +59,8 @@ func policyRowFor(s watchdog.Snapshot, p watchdog.PolicyView) policyRow {
 		ConfiguredAction: p.Action,
 		EffectiveAction:  p.EffectiveAction,
 		DryRunOverride:   p.Action != p.EffectiveAction,
+		Destructive:      p.EffectiveAction.Destructive(),
+		ActionAnchor:     "policy-" + string(p.Policy) + "-action",
 		MatchTags:        p.MatchTags,
 	}
 	r.ArrSummary, r.ArrDetails = arrBehaviorFor(s, p)
@@ -107,34 +112,112 @@ func blockedReasonFor(s watchdog.Snapshot, p watchdog.PolicyView) string {
 	return ""
 }
 
-// warningGroup is one deduplicated safety notice. Warnings that repeat once per
-// policy (the delete-files notice) collapse into a single group whose Policies
-// list names every affected policy, so the same warning is never printed once
-// per policy. Global warnings carry an empty Policies list.
+// warningGroup is one deduplicated safety notice. Warnings that share a stable
+// code collapse into a single group whose Policies list names every affected
+// policy, so the same warning is never printed once per policy. Tags are
+// aggregated across the merged warnings.
 type warningGroup struct {
+	Code     config.WarningCode
+	Scope    config.WarningScope
+	Target   string
 	Message  string
 	Policies []config.PolicyID
+	Tags     []string
 }
 
-// warningGroups groups the snapshot's warnings by their structured identity.
-// The message is the closed vocabulary from config.Warnings(); the Policy field
-// is the structured scope. Grouping by exact message (never by substring) and
-// collecting the affected policies keeps the dedup robust to reordering.
+// warningGroups groups the snapshot's warnings by their stable identity (Code)
+// and collects the affected policies from the structured Policy field. Grouping
+// never inspects the human message, so re-wording a warning cannot change how it
+// is deduplicated, and a warning affecting several policies lists them once.
 func warningGroups(warnings []config.Warning) []warningGroup {
 	groups := []warningGroup{}
-	index := map[string]int{}
+	index := map[config.WarningCode]int{}
 	for _, w := range warnings {
-		i, ok := index[w.Message]
+		i, ok := index[w.Code]
 		if !ok {
 			i = len(groups)
-			index[w.Message] = i
-			groups = append(groups, warningGroup{Message: w.Message})
+			index[w.Code] = i
+			groups = append(groups, warningGroup{Code: w.Code, Scope: w.Scope, Target: w.Target, Message: w.Message})
 		}
-		if w.Policy != "" {
+		if w.Policy != "" && !slices.Contains(groups[i].Policies, w.Policy) {
 			groups[i].Policies = append(groups[i].Policies, w.Policy)
+		}
+		for _, tag := range w.Tags {
+			if !slices.Contains(groups[i].Tags, tag) {
+				groups[i].Tags = append(groups[i].Tags, tag)
+			}
 		}
 	}
 	return groups
+}
+
+// warningFor returns the first warning carrying a code, so a surface can key on
+// a stable identity instead of on message text.
+func warningFor(warnings []config.Warning, code config.WarningCode) (config.Warning, bool) {
+	for _, w := range warnings {
+		if w.Code == code {
+			return w, true
+		}
+	}
+	return config.Warning{}, false
+}
+
+// diagnosticWarnings keeps the genuinely global notices for the compact,
+// expandable diagnostics area. Policy-scoped warnings live on their own rows,
+// and the dry-run notice lives in the header badge, so neither is repeated here.
+func diagnosticWarnings(warnings []config.Warning) []warningGroup {
+	out := []warningGroup{}
+	for _, g := range warningGroups(warnings) {
+		if g.Scope == config.WarningPolicy || g.Code == config.WarningDryRunDisabled {
+			continue
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
+// remediationLink is one distinct control an operator can reach to change a
+// policy's behavior. The three links around the stopped-Arr policy are not
+// interchangeable: each names a different control and a different effect.
+type remediationLink struct {
+	Label string
+	Body  string
+	Href  string
+}
+
+// policyGuide explains a policy that is currently armed, with the operator tags
+// it selects on and the distinct settings controls that can disarm it.
+type policyGuide struct {
+	Message string
+	Tags    []string
+	Links   []remediationLink
+}
+
+// stoppedPolicyWarning returns the guide for the stopped-Arr policy only while
+// that policy is armed; otherwise it is absent, so the callout is never shown
+// for a policy that cannot act. The matching tags come from the policy view, not
+// from the warning text.
+func stoppedPolicyWarning(s watchdog.Snapshot) *policyGuide {
+	warning, armed := warningFor(s.Warnings, config.WarningStoppedPolicyArmed)
+	if !armed {
+		return nil
+	}
+	tags := []string{}
+	for _, p := range s.Policies {
+		if p.Policy == config.StoppedArrManaged {
+			tags = p.MatchTags
+			break
+		}
+	}
+	return &policyGuide{
+		Message: warning.Message,
+		Tags:    tags,
+		Links: []remediationLink{
+			{Label: "Match tags", Body: "clear them to stop selecting torrents through this policy.", Href: "/settings#policy-stopped_arr_managed-match-tags"},
+			{Label: "Action", Body: "choose Report only to prevent this policy deleting torrents.", Href: "/settings#policy-stopped_arr_managed-action"},
+			{Label: "Arr recovery", Body: "choose None to prevent this policy requesting recovery.", Href: "/settings#policy-stopped_arr_managed-arr"},
+		},
+	}
 }
 
 // policyNames renders the human labels of a policy list, comma-separated, for

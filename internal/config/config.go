@@ -111,14 +111,14 @@ type Config struct {
 	// URL is the qBittorrent base URL, normalised to a trailing slash.
 	URL *url.URL
 
-	Username, Password, WebUsername, WebPassword string
-	APIKey                                       string `json:"-"`
+	Username, Password string
+	APIKey             string `json:"-"`
 
 	PollInterval, MaxObservationGap, HTTPTimeout                  time.Duration
 	DeleteConfirmationTimeout, UIRefreshInterval, ReadinessMaxAge time.Duration
 
-	DryRun, MetricsPublic, TLSInsecure, Once bool
-	TagSync                                  TagSync
+	DryRun, TLSInsecure, Once bool
+	TagSync                   TagSync
 
 	// MaxDeletions caps destructive actions per poll; 0 disables them.
 	MaxDeletions, HistoryLimit int
@@ -219,48 +219,90 @@ func (c Config) SafetyKey() string {
 	return hex.EncodeToString(h[:])
 }
 
-// PublicListen reports whether the UI is reachable from outside the host.
-func (c Config) PublicListen() bool {
-	host, _, _ := net.SplitHostPort(c.Listen)
-	if host == "localhost" {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return ip == nil || !ip.IsLoopback()
-}
+// WarningCode is the stable identifier of a warning. Presentation layers route
+// and deduplicate on this value, never on the human Message text, so wording can
+// change without moving a warning to a different surface.
+type WarningCode string
+
+const (
+	// WarningDryRunDisabled reports that global dry run is off.
+	WarningDryRunDisabled WarningCode = "dry_run_disabled"
+	// WarningRemoveFiles reports that a policy may remove payload files.
+	WarningRemoveFiles WarningCode = "remove_files"
+	// WarningTLSInsecure reports that certificate verification is disabled.
+	WarningTLSInsecure WarningCode = "tls_insecure"
+	// WarningReservedPrefix reports a tag that case-insensitively resembles the
+	// reserved watchdog prefix but is not rejected as one.
+	WarningReservedPrefix WarningCode = "reserved_prefix_near_miss"
+	// WarningStoppedPolicyArmed reports that the stopped-Arr policy can act.
+	WarningStoppedPolicyArmed WarningCode = "stopped_policy_armed"
+)
+
+// WarningScope names what a warning is about, so the UI can place it on the
+// matching surface: the header, a policy row, or a settings control.
+type WarningScope string
+
+const (
+	// WarningGlobal is a process-wide notice.
+	WarningGlobal WarningScope = "global"
+	// WarningPolicy is scoped to a policy (Policy is set).
+	WarningPolicy WarningScope = "policy"
+	// WarningSetting is scoped to a configuration control (Target is the anchor).
+	WarningSetting WarningScope = "setting"
+)
 
 // Warning is a loud, operator-visible safety notice. Warnings are derived
 // purely from the snapshot so they can be re-emitted after every reload, and
 // they never contain secrets.
+//
+// Code, Scope and Target are the stable identity the UI routes on; Message is
+// the human sentence shown to the operator. Policy is the structured policy the
+// warning belongs to (empty when it is not policy specific). Tags carries the
+// operator tags a tag-related warning is about.
 type Warning struct {
+	Code    WarningCode
+	Scope   WarningScope
+	Target  string // settings anchor (without '#') the warning links to, if any
 	Message string
 	Policy  PolicyID // empty when the warning is not policy specific
+	Tags    []string
 }
 
 // Warnings lists every unsafe aspect of the snapshot, in a stable order.
 func (c Config) Warnings() []Warning {
 	warnings := []Warning{}
 	if !c.DryRun {
-		warnings = append(warnings, Warning{Message: "DELETION ENABLED: dry_run is disabled"})
+		warnings = append(warnings, Warning{Code: WarningDryRunDisabled, Scope: WarningSetting, Target: "dry-run", Message: "Dry run disabled"})
 	}
 	for _, id := range PolicyIDs() {
 		if c.EffectiveAction(id) == DeleteFile {
-			warnings = append(warnings, Warning{Message: "DELETE FILES ENABLED: payload data can be removed", Policy: id})
+			warnings = append(warnings, Warning{
+				Code: WarningRemoveFiles, Scope: WarningPolicy, Target: "policy-" + string(id) + "-action",
+				Message: "Remove torrent and files", Policy: id,
+			})
 		}
 	}
 	if c.TLSInsecure {
-		warnings = append(warnings, Warning{Message: "TLS certificate verification disabled"})
+		warnings = append(warnings, Warning{Code: WarningTLSInsecure, Scope: WarningSetting, Target: "advanced", Message: "TLS certificate verification disabled"})
 	}
-	if c.WebUsername == "" && c.PublicListen() && !c.Once {
-		warnings = append(warnings, Warning{Message: "web UI exposed without authentication"})
-	}
-	for _, tag := range append(slices.Clone(c.ExcludeTags), c.Policies[StoppedArrManaged].MatchTags...) {
+	for _, tag := range c.ExcludeTags {
 		if reservedTagNearMiss(tag, c.TagSync.Prefix) {
-			warnings = append(warnings, Warning{Message: "tag resembles reserved watchdog prefix but remains an operator tag"})
+			warnings = append(warnings, Warning{Code: WarningReservedPrefix, Scope: WarningSetting, Target: "scope", Message: "Tag resembles the reserved watchdog prefix but remains an operator tag", Tags: []string{tag}})
+		}
+	}
+	if policy, ok := c.Policies[StoppedArrManaged]; ok {
+		for _, tag := range policy.MatchTags {
+			if reservedTagNearMiss(tag, c.TagSync.Prefix) {
+				warnings = append(warnings, Warning{Code: WarningReservedPrefix, Scope: WarningSetting, Target: "scope", Message: "Tag resembles the reserved watchdog prefix but remains an operator tag", Policy: StoppedArrManaged, Tags: []string{tag}})
+			}
 		}
 	}
 	if policy, ok := c.Policies[StoppedArrManaged]; ok && len(policy.MatchTags) > 0 && !c.DryRun && c.EffectiveAction(StoppedArrManaged) != Warn {
-		warnings = append(warnings, Warning{Message: "stopping matching tagged torrents can trigger warn/delete and Arr recovery", Policy: StoppedArrManaged})
+		warnings = append(warnings, Warning{
+			Code: WarningStoppedPolicyArmed, Scope: WarningPolicy, Target: "policy-stopped_arr_managed",
+			Message: "Stopping a torrent with these tags makes it eligible for this policy after its waiting period. Arr recovery depends on the configured recovery mode.",
+			Policy:  StoppedArrManaged,
+		})
 	}
 	return warnings
 }
@@ -394,12 +436,9 @@ func LoadWithEnvironment(path string, process map[string]string) (Config, error)
 	if err != nil {
 		return Config{}, err
 	}
-	environment, err := readDotEnv(filepath.Join(filepath.Dir(path), ".env"))
+	environment, err := effectiveEnvironment(path, process)
 	if err != nil {
 		return Config{}, err
-	}
-	for name, value := range process {
-		environment[name] = value
 	}
 	c, err := DecodeWithEnvironment(format, data, environment)
 	if err != nil {
@@ -450,7 +489,7 @@ func configDependencyPaths(path string, process map[string]string) ([]string, er
 		return nil, errors.New("configuration contains unknown fields or incorrect types")
 	}
 	paths := coreDependencyPaths(path)
-	paths = append(paths, f.APIKeyFile, f.PasswordFile, f.WebPasswordFile, f.TLSCAFile)
+	paths = append(paths, f.APIKeyFile, f.PasswordFile, f.TLSCAFile)
 	if f.Integrations != nil {
 		if f.Integrations.Sonarr != nil {
 			paths = append(paths, f.Integrations.Sonarr.APIKeyFile)
@@ -541,9 +580,6 @@ type fileConfig struct {
 	PasswordFile              string                  `json:"qbt_password_file"`
 	APIKey                    string                  `json:"qbt_api_key"`
 	APIKeyFile                string                  `json:"qbt_api_key_file"`
-	WebUsername               string                  `json:"web_username"`
-	WebPassword               string                  `json:"web_password"`
-	WebPasswordFile           string                  `json:"web_password_file"`
 	PollInterval              string                  `json:"poll_interval"`
 	MaxObservationGap         *string                 `json:"max_observation_gap"`
 	HTTPTimeout               string                  `json:"http_timeout"`
@@ -551,7 +587,6 @@ type fileConfig struct {
 	UIRefreshInterval         string                  `json:"ui_refresh_interval"`
 	ReadinessMaxAge           string                  `json:"readiness_max_age"`
 	DryRun                    bool                    `json:"dry_run"`
-	MetricsPublic             bool                    `json:"metrics_public"`
 	TLSInsecure               bool                    `json:"tls_insecure_skip_verify"`
 	MaxDeletions              int                     `json:"max_actions_per_poll"`
 	HistoryLimit              int                     `json:"history_limit"`
@@ -574,7 +609,7 @@ func defaults() fileConfig {
 	return fileConfig{
 		PollInterval: "30s", HTTPTimeout: "10s", DeleteConfirmationTimeout: "2m",
 		UIRefreshInterval: "5s", ReadinessMaxAge: "2m",
-		DryRun: true, MetricsPublic: true,
+		DryRun:       true,
 		MaxDeletions: 10, HistoryLimit: 100,
 		ExcludeTags: []string{"keep", "qbt-watchdog-ignore"},
 		StateFile:   "/data/state.json", Listen: ":8080",
@@ -596,6 +631,23 @@ func Decode(format Format, data []byte) (Config, error) {
 	return DecodeWithEnvironment(format, data, nil)
 }
 
+// removedWebAuthKeys are the built-in web authentication settings that no
+// longer exist. They are still parsed by Viper (Viper keeps every key), so a
+// file that carries them can be recognised and rejected with a migration
+// instruction instead of a generic unknown-field error. A deployment that
+// relied on built-in auth must not start silently unprotected.
+var removedWebAuthKeys = []string{"web_username", "web_password", "web_password_file", "metrics_public"}
+
+func removedWebAuthSettings(settings map[string]any) []string {
+	removed := []string{}
+	for _, key := range removedWebAuthKeys {
+		if _, present := settings[key]; present {
+			removed = append(removed, key)
+		}
+	}
+	return removed
+}
+
 // DecodeWithEnvironment expands parsed string values using only environment.
 // Neither decoder reads the process environment or .env; Decode rejects any
 // unescaped reference. Secret-file settings still read their named files.
@@ -608,8 +660,12 @@ func DecodeWithEnvironment(format Format, data []byte, environment map[string]st
 	if err := v.ReadConfig(bytes.NewReader(data)); err != nil {
 		return Config{}, fmt.Errorf("invalid %s syntax", format)
 	}
+	parsed := v.AllSettings()
+	if removed := removedWebAuthSettings(parsed); len(removed) > 0 {
+		return Config{}, fmt.Errorf("built-in web authentication was removed; delete %s and enforce access control with a reverse proxy", strings.Join(removed, ", "))
+	}
 	f := defaults()
-	settings, err := json.Marshal(v.AllSettings())
+	settings, err := json.Marshal(parsed)
 	if err != nil {
 		return Config{}, errors.New("invalid configuration values")
 	}
@@ -645,8 +701,8 @@ func build(f fileConfig) (Config, error) {
 	}
 	c := Config{
 		Integrations: integrations,
-		URL:          endpoint, Username: f.Username, WebUsername: f.WebUsername,
-		DryRun: f.DryRun, MetricsPublic: f.MetricsPublic, TLSInsecure: f.TLSInsecure,
+		URL:          endpoint, Username: f.Username,
+		DryRun: f.DryRun, TLSInsecure: f.TLSInsecure,
 		MaxDeletions: f.MaxDeletions, HistoryLimit: f.HistoryLimit,
 		IncludeCategories: normalizeList(f.IncludeCategories),
 		ExcludeCategories: normalizeList(f.ExcludeCategories),
@@ -829,8 +885,7 @@ func resolveSecrets(f fileConfig, c *Config) error {
 	if c.Password, err = read(f.Password, f.PasswordFile); err != nil {
 		return err
 	}
-	c.WebPassword, err = read(f.WebPassword, f.WebPasswordFile)
-	return err
+	return nil
 }
 
 func validate(c *Config) error {
@@ -856,7 +911,7 @@ func validate(c *Config) error {
 	if c.HistoryLimit < 1 || c.HistoryLimit > 10000 {
 		return errors.New("history_limit must be between 1 and 10000")
 	}
-	if (c.Username == "") != (c.Password == "") || (c.WebUsername == "") != (c.WebPassword == "") {
+	if (c.Username == "") != (c.Password == "") {
 		return errors.New("credentials require both username and password")
 	}
 	if c.StateFile == "" {

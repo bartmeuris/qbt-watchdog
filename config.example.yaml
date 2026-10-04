@@ -313,27 +313,31 @@ history_limit: 100
 # Web interface
 # ---------------------------------------------------------------------------
 
-# host:port for the dashboard, the JSON API, /healthz, /readyz and /metrics.
-# RESTART REQUIRED.
+# host:port for the four web UI pages (Overview, Active policies, Activity and
+# Settings), the JSON API, /healthz, /readyz and /metrics. RESTART REQUIRED.
 listen: ":8080"
 
-# How often the dashboard refreshes itself.
+# How often the Overview and Activity live fragments refresh themselves.
 ui_refresh_interval: "5s"
 
 # /readyz reports not-ready once the last successful poll is older than this.
 readiness_max_age: "2m"
 
-# HTTP basic auth for the dashboard and the JSON API. Both must be set or both
-# empty. Leaving them empty while listening on a non-loopback address is
-# allowed but logged loudly. web_password and web_password_file are mutually
-# exclusive, and the file is re-read when it changes.
-web_username: ""
-web_password: ""
-web_password_file: ""
-
-# When true, /metrics is served without authentication so a scraper does not
-# need credentials. Set to false to put /metrics behind the same basic auth.
-metrics_public: true
+# The Settings page edits this file through a structured, source-preserving form
+# (with a raw editor behind an advanced disclosure); every secret offers Value,
+# Env var or Path sources, and the Connections section shows only the credentials
+# the selected qBittorrent auth mode can use. listen and state_file are shown
+# read-only because they require a restart.
+#
+# There is no built-in web authentication. The UI pages, JSON API, settings
+# editor and manual actions are served to anyone who can reach `listen`, and
+# /metrics is always served without credentials. Deploy behind a reverse proxy
+# that terminates TLS and enforces access control, and never expose `listen`
+# directly to an untrusted network. The former web_username, web_password,
+# web_password_file and metrics_public settings no longer exist; a configuration
+# that still carries them is rejected with a migration error naming the keys to
+# delete ("built-in web authentication was removed; delete … and enforce access
+# control with a reverse proxy").
 
 # ---------------------------------------------------------------------------
 # TLS

@@ -1,13 +1,13 @@
 package config
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"time"
 
@@ -18,23 +18,41 @@ import (
 var ErrConflict = errors.New("config file changed on disk; reload and retry")
 
 // Patch is the set of settings the UI may edit. Every field is a pointer so
-// the UI can send only the fields it changed. Use the same JSON tags as the
-// config file keys (snake_case).
+// the UI can send only the fields it changed. A nil pointer means "unchanged";
+// a non-nil pointer to the zero value means "set to zero/false/empty". Use the
+// same JSON tags as the config file keys (snake_case).
 type Patch struct {
-	DryRun                    *bool     `json:"dry_run,omitempty"`
-	LogLevel                  *string   `json:"log_level,omitempty"`
-	LogFormat                 *string   `json:"log_format,omitempty"`
-	LogColor                  *string   `json:"log_color,omitempty"`
-	MaxActionsPerPoll         *int      `json:"max_actions_per_poll,omitempty"`
-	MaxObservationGap         *string   `json:"max_observation_gap,omitempty"` // duration string
-	DeleteConfirmationTimeout *string   `json:"delete_confirmation_timeout,omitempty"`
-	HistoryLimit              *int      `json:"history_limit,omitempty"`
-	UIRefreshInterval         *string   `json:"ui_refresh_interval,omitempty"`
-	TagSyncEnabled            *bool     `json:"tag_sync_enabled,omitempty"`
-	TagSyncMaxWritesPerPoll   *int      `json:"tag_sync_max_writes_per_poll,omitempty"`
-	IncludeCategories         *[]string `json:"include_categories,omitempty"`
-	ExcludeCategories         *[]string `json:"exclude_categories,omitempty"`
-	ExcludeTags               *[]string `json:"exclude_tags,omitempty"`
+	// General.
+	DryRun            *bool   `json:"dry_run,omitempty"`
+	MaxActionsPerPoll *int    `json:"max_actions_per_poll,omitempty"`
+	PollInterval      *string `json:"poll_interval,omitempty"`
+	UIRefreshInterval *string `json:"ui_refresh_interval,omitempty"`
+	HistoryLimit      *int    `json:"history_limit,omitempty"`
+	// Advanced.
+	MaxObservationGap         *string `json:"max_observation_gap,omitempty"` // duration string
+	DeleteConfirmationTimeout *string `json:"delete_confirmation_timeout,omitempty"`
+	HTTPTimeout               *string `json:"http_timeout,omitempty"`
+	ReadinessMaxAge           *string `json:"readiness_max_age,omitempty"`
+	TagSyncEnabled            *bool   `json:"tag_sync_enabled,omitempty"`
+	TagSyncPrefix             *string `json:"tag_sync_prefix,omitempty"`
+	TagSyncMaxWritesPerPoll   *int    `json:"tag_sync_max_writes_per_poll,omitempty"`
+	TLSInsecure               *bool   `json:"tls_insecure_skip_verify,omitempty"`
+	TLSCAFile                 *string `json:"tls_ca_file,omitempty"`
+	LogLevel                  *string `json:"log_level,omitempty"`
+	LogFormat                 *string `json:"log_format,omitempty"`
+	LogColor                  *string `json:"log_color,omitempty"`
+	StateFile                 *string `json:"state_file,omitempty"`
+	Listen                    *string `json:"listen,omitempty"`
+	// Scope.
+	IncludeCategories *[]string `json:"include_categories,omitempty"`
+	ExcludeCategories *[]string `json:"exclude_categories,omitempty"`
+	ExcludeTags       *[]string `json:"exclude_tags,omitempty"`
+	// Connections.
+	QBTURL      *string `json:"qbt_url,omitempty"`
+	QBTUsername *string `json:"qbt_username,omitempty"`
+	QBTAuthMode *string `json:"qbt_auth_mode,omitempty"` // api_key|password|none
+	// Secrets maps a secret key (e.g. "qbt_api_key") to its patch.
+	Secrets map[string]SecretPatch `json:"secrets,omitempty"`
 	// Policies maps a policy id (e.g. "stalled_no_seeders") to its editable fields.
 	Policies map[string]PolicyPatch `json:"policies,omitempty"`
 	// Integrations maps an integration name ("sonarr"/"radarr") to its editable fields.
@@ -45,23 +63,45 @@ type Patch struct {
 type PolicyPatch struct {
 	Action           *string   `json:"action,omitempty"` // warn|delete|delete_file
 	ThresholdSeconds *int      `json:"threshold_seconds,omitempty"`
+	ArrMode          *string   `json:"arr_mode,omitempty"` // inherit|none|blocklist_and_search|blocklist_only|search_only
 	MatchTags        *[]string `json:"match_tags,omitempty"`
 }
 
 // IntegrationPatch is the editable subset of one media-manager integration.
 type IntegrationPatch struct {
-	Mode *string `json:"mode,omitempty"` // none|blocklist_only|search_only|blocklist_and_search
+	Enabled    *bool     `json:"enabled,omitempty"`
+	URL        *string   `json:"url,omitempty"`
+	Mode       *string   `json:"mode,omitempty"` // blocklist_and_search|blocklist_only|search_only
+	Timeout    *string   `json:"timeout,omitempty"`
+	Categories *[]string `json:"categories,omitempty"`
 }
 
-// Editor reads and writes the raw config file at path. It edits the raw YAML
+// SecretPatch changes one secret's source. Mode is keep (default), replace or
+// clear. For replace, Source selects value, env or path and the matching field
+// carries the new source. A keep patch never touches the document.
+type SecretPatch struct {
+	Mode   string  `json:"mode,omitempty"`
+	Source string  `json:"source,omitempty"`
+	Value  *string `json:"value,omitempty"`
+	Env    *string `json:"env,omitempty"`
+	Path   *string `json:"path,omitempty"`
+}
+
+// Editor reads and writes the raw config file at path. It edits the raw
 // document rather than the resolved Config, so comments, key order and
 // ${ENV}/secret references survive a save untouched.
 type Editor struct {
-	path string
+	path    string
+	current func() Config
 }
 
 // NewEditor returns an Editor bound to path.
 func NewEditor(path string) *Editor { return &Editor{path: path} }
+
+// SetCurrent supplies the running configuration so a save can reject a
+// restart-only change before it is written. It is optional; without it the
+// manager still rejects the change when the candidate is applied.
+func (e *Editor) SetCurrent(current func() Config) { e.current = current }
 
 // Read returns the raw file bytes and a stamp identifying this exact version.
 // The stamp folds the modification time and a content hash, so a same-size
@@ -83,13 +123,17 @@ func (e *Editor) Read() (raw []byte, stamp string, err error) {
 	return raw, fileStamp(raw, info.ModTime()), nil
 }
 
-// Save applies patch to the raw document, re-encodes it preserving comments and
-// key order, and atomically writes it. It returns the new stamp. If the file
-// changed since Read (stamp mismatch) it returns ErrConflict without writing.
-// After a successful write it validates the result through the same loader the
-// watcher uses and returns that error, so a caller can report "saved but
-// rejected". ${ENV} and secret references are never resolved here.
+// Save applies patch to the raw document, validates the candidate, and only
+// then atomically writes it. It returns the new stamp. If the file changed
+// since Read (stamp mismatch) it returns ErrConflict without writing. An
+// invalid candidate is rejected before the file is touched, so a bad edit can
+// never overwrite a good configuration. ${ENV} and secret references are never
+// resolved into the document.
 func (e *Editor) Save(raw []byte, stamp string, patch Patch) (newStamp string, err error) {
+	format, err := FormatFor(e.path)
+	if err != nil {
+		return "", err
+	}
 	_, currentStamp, err := e.Read()
 	if err != nil {
 		return "", err
@@ -97,26 +141,26 @@ func (e *Editor) Save(raw []byte, stamp string, patch Patch) (newStamp string, e
 	if currentStamp != stamp {
 		return "", ErrConflict
 	}
-	out, err := applyPatch(raw, patch)
+	candidate, err := applyPatch(format, raw, patch)
 	if err != nil {
 		return "", err
 	}
-	if err := e.writeAtomic(out); err != nil {
+	if err := e.validate(candidate); err != nil {
+		return "", err
+	}
+	if err := e.writeAtomic(candidate); err != nil {
 		return "", err
 	}
 	info, err := os.Stat(e.path)
 	if err != nil {
 		return "", err
 	}
-	newStamp = fileStamp(out, info.ModTime())
-	if _, err := Load(e.path); err != nil {
-		return newStamp, err
-	}
-	return newStamp, nil
+	return fileStamp(candidate, info.ModTime()), nil
 }
 
-// SaveRaw validates raw and atomically writes it, returning the new stamp.
-// It does not apply a patch; the caller supplies the full edited document.
+// SaveRaw validates raw and only then atomically writes it, returning the new
+// stamp. It does not apply a patch; the caller supplies the full edited
+// document. An invalid document is rejected before the file is touched.
 func (e *Editor) SaveRaw(raw []byte, stamp string) (newStamp string, err error) {
 	_, currentStamp, err := e.Read()
 	if err != nil {
@@ -125,6 +169,9 @@ func (e *Editor) SaveRaw(raw []byte, stamp string) (newStamp string, err error) 
 	if currentStamp != stamp {
 		return "", ErrConflict
 	}
+	if err := e.validate(raw); err != nil {
+		return "", err
+	}
 	if err := e.writeAtomic(raw); err != nil {
 		return "", err
 	}
@@ -132,11 +179,28 @@ func (e *Editor) SaveRaw(raw []byte, stamp string) (newStamp string, err error) 
 	if err != nil {
 		return "", err
 	}
-	newStamp = fileStamp(raw, info.ModTime())
-	if _, err := Load(e.path); err != nil {
-		return newStamp, err
+	return fileStamp(raw, info.ModTime()), nil
+}
+
+// validate decodes a candidate with the same environment and path context the
+// loader uses, then rejects a restart-only change against the running config.
+func (e *Editor) validate(data []byte) error {
+	format, err := FormatFor(e.path)
+	if err != nil {
+		return err
 	}
-	return newStamp, nil
+	environment, err := effectiveEnvironment(e.path, environmentSnapshot(os.Environ()))
+	if err != nil {
+		return err
+	}
+	next, err := DecodeWithEnvironment(format, data, environment)
+	if err != nil {
+		return err
+	}
+	if e.current != nil {
+		return RestartRequiredError(e.current(), next)
+	}
+	return nil
 }
 
 // fileStamp identifies one exact on-disk version of the file.
@@ -186,101 +250,110 @@ func (e *Editor) writeAtomic(data []byte) error {
 	return nil
 }
 
-// applyPatch edits a raw YAML document in place, preserving every key, comment
-// and scalar it does not touch. It never serializes a resolved Config.
-func applyPatch(raw []byte, patch Patch) ([]byte, error) {
-	var doc yaml.Node
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("invalid configuration YAML: %w", err)
+// applyPatch edits a raw document in place, preserving every key, comment and
+// scalar it does not touch. It never serializes a resolved Config. The same
+// patch applies to YAML and TOML through the documentEditor abstraction.
+func applyPatch(format Format, raw []byte, patch Patch) ([]byte, error) {
+	editor, err := newDocumentEditor(format, raw)
+	if err != nil {
+		return nil, err
 	}
-	if len(doc.Content) == 0 {
-		doc.Content = []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}
-	}
-	root := doc.Content[0]
-	if root.Kind != yaml.MappingNode {
-		return nil, errors.New("configuration root must be a mapping")
-	}
-
-	setString := func(key string, v *string) {
+	setString := func(path []string, v *string) {
 		if v != nil {
-			setMappingKey(root, key, scalarNode("!!str", *v))
+			editor.set(path, *v)
 		}
 	}
-	setBool := func(key string, v *bool) {
+	setBool := func(path []string, v *bool) {
 		if v != nil {
-			setMappingKey(root, key, scalarNode("!!bool", strconv.FormatBool(*v)))
+			editor.set(path, *v)
 		}
 	}
-	setInt := func(key string, v *int) {
+	setInt := func(path []string, v *int) {
 		if v != nil {
-			setMappingKey(root, key, scalarNode("!!int", strconv.Itoa(*v)))
+			editor.set(path, *v)
 		}
 	}
-	setStringList := func(key string, v *[]string) {
+	setStringList := func(path []string, v *[]string) {
 		if v != nil {
-			setMappingKey(root, key, stringListNode(*v))
+			editor.set(path, *v)
 		}
 	}
 
-	setBool("dry_run", patch.DryRun)
-	setString("log_level", patch.LogLevel)
-	setString("log_format", patch.LogFormat)
-	setString("log_color", patch.LogColor)
-	setInt("max_actions_per_poll", patch.MaxActionsPerPoll)
-	setString("max_observation_gap", patch.MaxObservationGap)
-	setString("delete_confirmation_timeout", patch.DeleteConfirmationTimeout)
-	setInt("history_limit", patch.HistoryLimit)
-	setString("ui_refresh_interval", patch.UIRefreshInterval)
-	setStringList("include_categories", patch.IncludeCategories)
-	setStringList("exclude_categories", patch.ExcludeCategories)
-	setStringList("exclude_tags", patch.ExcludeTags)
-
-	if patch.TagSyncEnabled != nil || patch.TagSyncMaxWritesPerPoll != nil {
-		tagSync := ensureMapping(root, "tag_sync")
-		if patch.TagSyncEnabled != nil {
-			setMappingKey(tagSync, "enabled", scalarNode("!!bool", strconv.FormatBool(*patch.TagSyncEnabled)))
-		}
-		if patch.TagSyncMaxWritesPerPoll != nil {
-			setMappingKey(tagSync, "max_writes_per_poll", scalarNode("!!int", strconv.Itoa(*patch.TagSyncMaxWritesPerPoll)))
+	// Authentication mode first, so a secret patch in the same request wins.
+	if patch.QBTAuthMode != nil {
+		if err := applyAuthMode(editor, *patch.QBTAuthMode); err != nil {
+			return nil, err
 		}
 	}
 
-	if len(patch.Policies) > 0 {
-		policies := ensureMapping(root, "policies")
-		for id, pp := range patch.Policies {
-			policy := ensureMapping(policies, id)
-			if pp.Action != nil {
-				setMappingKey(policy, "action", scalarNode("!!str", *pp.Action))
-			}
-			if pp.ThresholdSeconds != nil {
-				setMappingKey(policy, "threshold", scalarNode("!!str", strconv.Itoa(*pp.ThresholdSeconds)+"s"))
-			}
-			if pp.MatchTags != nil {
-				setMappingKey(policy, "match_tags", stringListNode(*pp.MatchTags))
-			}
+	setBool([]string{"dry_run"}, patch.DryRun)
+	setInt([]string{"max_actions_per_poll"}, patch.MaxActionsPerPoll)
+	setString([]string{"poll_interval"}, patch.PollInterval)
+	setString([]string{"ui_refresh_interval"}, patch.UIRefreshInterval)
+	setInt([]string{"history_limit"}, patch.HistoryLimit)
+	setString([]string{"max_observation_gap"}, patch.MaxObservationGap)
+	setString([]string{"delete_confirmation_timeout"}, patch.DeleteConfirmationTimeout)
+	setString([]string{"http_timeout"}, patch.HTTPTimeout)
+	setString([]string{"readiness_max_age"}, patch.ReadinessMaxAge)
+	setBool([]string{"tag_sync", "enabled"}, patch.TagSyncEnabled)
+	setString([]string{"tag_sync", "prefix"}, patch.TagSyncPrefix)
+	setInt([]string{"tag_sync", "max_writes_per_poll"}, patch.TagSyncMaxWritesPerPoll)
+	setBool([]string{"tls_insecure_skip_verify"}, patch.TLSInsecure)
+	setString([]string{"tls_ca_file"}, patch.TLSCAFile)
+	setString([]string{"log_level"}, patch.LogLevel)
+	setString([]string{"log_format"}, patch.LogFormat)
+	setString([]string{"log_color"}, patch.LogColor)
+	setString([]string{"state_file"}, patch.StateFile)
+	setString([]string{"listen"}, patch.Listen)
+	setStringList([]string{"include_categories"}, patch.IncludeCategories)
+	setStringList([]string{"exclude_categories"}, patch.ExcludeCategories)
+	setStringList([]string{"exclude_tags"}, patch.ExcludeTags)
+	setString([]string{"qbt_url"}, patch.QBTURL)
+	setString([]string{"qbt_username"}, patch.QBTUsername)
+
+	for _, id := range sortedKeys(patch.Policies) {
+		pp := patch.Policies[id]
+		path := []string{"policies", id}
+		setString(append(path, "action"), pp.Action)
+		if pp.ThresholdSeconds != nil {
+			editor.set(append(path, "threshold"), strconv.Itoa(*pp.ThresholdSeconds)+"s")
+		}
+		setString(append(path, "arr_mode"), pp.ArrMode)
+		setStringList(append(path, "match_tags"), pp.MatchTags)
+	}
+
+	for _, name := range sortedKeys(patch.Integrations) {
+		ip := patch.Integrations[name]
+		path := []string{"integrations", name}
+		setBool(append(path, "enabled"), ip.Enabled)
+		setString(append(path, "url"), ip.URL)
+		setString(append(path, "mode"), ip.Mode)
+		setString(append(path, "timeout"), ip.Timeout)
+		setStringList(append(path, "categories"), ip.Categories)
+	}
+
+	for _, key := range sortedKeys(patch.Secrets) {
+		spec, ok := secretSpecByKey[key]
+		if !ok {
+			return nil, fmt.Errorf("unknown secret %q", key)
+		}
+		if err := applySecretPatch(editor, spec, patch.Secrets[key]); err != nil {
+			return nil, err
 		}
 	}
 
-	if len(patch.Integrations) > 0 {
-		integrations := ensureMapping(root, "integrations")
-		for name, ip := range patch.Integrations {
-			integration := ensureMapping(integrations, name)
-			if ip.Mode != nil {
-				setMappingKey(integration, "mode", scalarNode("!!str", *ip.Mode))
-			}
-		}
-	}
+	return editor.encode()
+}
 
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if err := enc.Encode(&doc); err != nil {
-		return nil, fmt.Errorf("cannot encode configuration: %w", err)
+// sortedKeys returns the map keys in a stable order so a patch produces the
+// same document regardless of Go's map iteration order.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
 	}
-	if err := enc.Close(); err != nil {
-		return nil, fmt.Errorf("cannot encode configuration: %w", err)
-	}
-	return buf.Bytes(), nil
+	sort.Strings(keys)
+	return keys
 }
 
 func scalarNode(tag, value string) *yaml.Node {

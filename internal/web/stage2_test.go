@@ -25,7 +25,7 @@ func TestStatusPublishesPerPolicyModelAndReloadHealth(t *testing.T) {
 	h := Handler(c, func() watchdog.Snapshot { return *s }, m)
 
 	var decoded map[string]any
-	body := request(h, "/api/v1/status", "viewer", "SECRET_PASSWORD").Body.Bytes()
+	body := request(h, "/api/v1/status").Body.Bytes()
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		t.Fatal(err)
 	}
@@ -55,18 +55,18 @@ func TestFailedReloadDegradesReadinessButNotLiveness(t *testing.T) {
 	h := Handler(c, func() watchdog.Snapshot { return *s }, m)
 	now := time.Now().UTC()
 	s.LastSuccess = &now
-	if request(h, "/readyz", "", "").Code != 200 {
+	if request(h, "/readyz").Code != 200 {
 		t.Fatal("healthy process not ready")
 	}
 	s.ConfigStatus = config.Status{Generation: 3, LastReloadError: "poll_interval must be a positive duration"}
-	if code := request(h, "/readyz", "", "").Code; code != 503 {
+	if code := request(h, "/readyz").Code; code != 503 {
 		t.Fatal("failed reload did not degrade readiness", code)
 	}
-	if request(h, "/healthz", "", "").Code != 200 {
+	if request(h, "/healthz").Code != 200 {
 		t.Fatal("failed reload wrongly degraded liveness")
 	}
 	// The reason is a fixed string, never the operator's file content.
-	reason := request(h, "/readyz", "", "").Body.String()
+	reason := request(h, "/readyz").Body.String()
 	if strings.Contains(reason, "poll_interval") {
 		t.Fatal("readiness echoed reload error detail", reason)
 	}
@@ -85,7 +85,7 @@ func TestPolicyMetricsUseBoundedEnumLabelsOnly(t *testing.T) {
 	}
 	m.ReloadHealthy.Set(0)
 	m.ConfigGeneration.Set(4)
-	body := request(Handler(c, func() watchdog.Snapshot { return *s }, m), "/metrics", "", "").Body.String()
+	body := request(Handler(c, func() watchdog.Snapshot { return *s }, m), "/metrics").Body.String()
 	for _, want := range []string{
 		`qbt_watchdog_policy_tracked{policy="stalled_no_seeders"} 2`,
 		`qbt_watchdog_policy_threshold_seconds{policy="stalled_partial"} 30`,

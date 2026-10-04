@@ -156,6 +156,7 @@ func (s *Service) recoveryEvent(job store.RecoveryJob, code string) {
 		ShortHash:   qbt.ShortHash(job.Hash),
 		Name:        job.Name,
 		CommandID:   job.CommandID,
+		ID:          s.nextEventID(),
 	}).Bounded()
 	if code == "search_completed" || code == "blocklist_completed" {
 		e.Outcome = "success"

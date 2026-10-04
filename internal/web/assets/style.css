@@ -21,7 +21,7 @@ body {
     margin: 0;
     background: radial-gradient(ellipse at 85% 0, #8aa6d825, transparent 55%), var(--bg);
     color: var(--ink);
-    font: 15px/1.6 "Avenir Next", "Trebuchet MS", sans-serif
+    font: 13px/1.5 "Avenir Next", "Trebuchet MS", sans-serif
 }
 
 header,
@@ -81,17 +81,6 @@ h3 {
 
 p {
     margin: 8px 0
-}
-
-.eyebrow {
-    font: 12px "Courier New", monospace;
-    letter-spacing: .16em;
-    color: var(--accent)
-}
-
-.sub {
-    color: var(--muted);
-    font-size: .85rem
 }
 
 .app-name {
@@ -179,48 +168,9 @@ dd {
 footer,
 .section-heading p,
 small,
-.gate-detail,
-.policy-meta,
-.sub,
 .caveat {
     color: var(--muted);
-    font-size: .83rem
-}
-
-.cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 12px;
-    margin: 16px 0
-}
-
-.card {
-    background: var(--bg);
-    border: 1px solid var(--line);
-    padding: 14px;
-    border-radius: 8px
-}
-
-.card strong {
-    display: block;
-    font: 1.9rem Georgia, serif;
-    color: var(--accent)
-}
-
-.card span {
-    font-size: .78rem;
-    color: var(--muted)
-}
-
-.integrations {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px 16px
-}
-
-.integration {
-    font-size: .85rem;
-    color: var(--muted)
+    font-size: 12px
 }
 
 /* Visually hidden, still announced by screen readers ---------------------- */
@@ -404,6 +354,18 @@ details.service summary:focus-visible {
     padding: 12px 14px
 }
 
+/* A transparent bridge across the gap between the indicator and its popover,
+   so moving the pointer down into the popover never leaves the disclosure and
+   closes it. */
+.popover::before {
+    content: "";
+    position: absolute;
+    top: -6px;
+    left: 0;
+    right: 0;
+    height: 6px
+}
+
 .popover dl {
     grid-template-columns: 110px 1fr;
     gap: 4px 10px;
@@ -427,7 +389,7 @@ details.history summary {
 }
 
 .t-action {
-    font-weight: 600
+    color: var(--ink)
 }
 
 .t-service {
@@ -489,11 +451,10 @@ details.history summary {
 }
 
 .caveat {
-    border-left: 3px solid var(--accent);
-    background: linear-gradient(90deg, var(--tint), transparent 70%);
-    padding: 10px 16px;
-    margin: 0 0 16px;
-    max-width: 90ch
+    margin: 12px 0 0;
+    padding: 0;
+    border: 0;
+    background: none
 }
 
 .warning {
@@ -601,6 +562,95 @@ details.history summary {
     color: var(--muted)
 }
 
+.warning-tags {
+    color: var(--muted)
+}
+
+.warning-target {
+    color: var(--accent-ink);
+    margin-left: 6px;
+    white-space: nowrap
+}
+
+/* The mode badge links to the dry-run control when dry run is off. */
+#mode a {
+    color: inherit;
+    text-decoration: underline;
+    text-underline-offset: 3px
+}
+
+/* The effective action is a link to its own control; a destructive action is
+   stated in restrained red rather than as a loud warning block. */
+.policy-action a.p-effective {
+    color: var(--ink);
+    text-decoration: none
+}
+
+.policy-action a.p-effective:hover,
+.policy-action a.p-effective:focus-visible {
+    text-decoration: underline
+}
+
+.policy-action a.p-destructive {
+    color: var(--danger)
+}
+
+/* Global diagnostics collapse into one row instead of a block of paragraphs. */
+.diagnostics {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin: 8px 0 16px;
+    background: var(--paper)
+}
+
+.diagnostics > summary {
+    cursor: pointer;
+    padding: 8px 14px;
+    color: var(--muted);
+    font-size: .82rem
+}
+
+.diagnostics-list {
+    padding: 0 14px 10px
+}
+
+/* The stopped-Arr guide is placed on its policy row and beside its controls. */
+.policy-warning {
+    padding: 0 12px 12px
+}
+
+.policy-guide {
+    border-left: 3px solid var(--warn);
+    background: linear-gradient(90deg, #b4530912, transparent 70%);
+    padding: 10px 14px;
+    border-radius: 0 8px 8px 0
+}
+
+.policy-guide-text {
+    margin: 0 0 6px;
+    font-size: .85rem
+}
+
+.policy-guide-tags {
+    margin: 0 0 6px;
+    color: var(--muted);
+    font-size: .82rem
+}
+
+.policy-guide-links {
+    margin: 0;
+    padding-left: 18px;
+    font-size: .82rem
+}
+
+.policy-guide-links li {
+    margin: 2px 0
+}
+
+.policy-guide-links a {
+    color: var(--accent-ink)
+}
+
 .policy code,
 .t-machine {
     font-family: "Courier New", monospace;
@@ -646,7 +696,7 @@ details summary {
     grid-template-columns: 2fr 2fr 2fr 1.4fr;
     gap: 12px;
     align-items: center;
-    padding: 12px;
+    padding: 8px 12px;
     cursor: pointer;
     list-style: none
 }
@@ -681,7 +731,6 @@ details.overdue {
 }
 
 .t-name {
-    font-weight: 600;
     display: block;
     white-space: nowrap;
     overflow: hidden;
@@ -695,15 +744,6 @@ details.overdue {
     color: var(--muted)
 }
 
-.flag-eligible {
-    color: var(--accent-ink);
-    font-weight: 600
-}
-
-.flag-blocked {
-    color: var(--muted)
-}
-
 .flag-overdue {
     color: var(--warn);
     font-weight: 600
@@ -713,6 +753,32 @@ details.overdue {
     color: var(--muted);
     padding: 14px;
     margin: 0
+}
+
+/* Torrent-list state notice: waiting for the first snapshot, a rejected
+   response, or rows retained from an earlier accepted list. It is a keyed
+   sibling of the rows, so a live refresh inserts or removes it without
+   replacing the rows themselves. */
+.notice {
+    margin: 0;
+    padding: 12px 14px;
+    border-left: 3px solid var(--line);
+    color: var(--muted);
+    font-size: .9rem
+}
+
+.notice-waiting {
+    border-left-color: var(--line)
+}
+
+.notice-rejected {
+    border-left-color: var(--danger);
+    color: var(--danger)
+}
+
+.notice-stale {
+    border-left-color: var(--warn);
+    color: var(--warn)
 }
 
 /* Compact torrent columns ------------------------------------------------- */
@@ -923,40 +989,11 @@ details.torrent summary {
     grid-template-columns: 180px 1fr
 }
 
-.gates,
 .trace,
 .timeline {
     list-style: none;
     margin: 0 0 8px;
     padding: 0
-}
-
-.gates li {
-    display: grid;
-    grid-template-columns: 170px 70px 1fr;
-    gap: 8px;
-    padding: 6px 0;
-    border-bottom: 1px solid var(--line);
-    font-size: .85rem
-}
-
-.gate-name {
-    color: var(--muted);
-    font-weight: 600
-}
-
-.gate-result {
-    font-size: .75rem;
-    text-transform: uppercase;
-    letter-spacing: .04em
-}
-
-.gate-pass .gate-result {
-    color: var(--accent)
-}
-
-.gate-fail .gate-result {
-    color: var(--danger)
 }
 
 .trace li {
@@ -999,8 +1036,7 @@ details.torrent summary {
 }
 
 .step-completed .step-status {
-    color: var(--accent-ink);
-    font-weight: 600
+    color: var(--accent-ink)
 }
 
 .step-skipped {
@@ -1024,8 +1060,7 @@ details.torrent summary {
 }
 
 .step-label {
-    color: var(--muted);
-    font-weight: 600
+    color: var(--muted)
 }
 
 code {
@@ -1141,9 +1176,25 @@ footer {
 }
 
 /* Stale fragment marker: applied by the coordinator when a poll fails, so an
-   operator can see the data is no longer live without losing it. */
+   operator can see the data is no longer live without losing it. It is cleared
+   again as soon as a poll recovers. */
 .stale {
-    opacity: .7
+    opacity: .7;
+    outline: 1px dashed var(--warn);
+    outline-offset: 4px
+}
+
+/* Activity announcement: names newly appended entries while the reader is
+   scrolled away from the top, so older entries are never pushed off-screen
+   without a word. */
+.history-new {
+    margin: 0 0 .6rem;
+    font-size: .85rem;
+    color: var(--warn)
+}
+
+.history-new:empty {
+    display: none
 }
 
 /* Dark theme ----------------------------------------------------------------- */
@@ -1217,10 +1268,6 @@ footer {
         margin-bottom: 8px
     }
 
-    .cards {
-        grid-template-columns: repeat(2, 1fr)
-    }
-
     .list-head {
         display: none
     }
@@ -1254,6 +1301,10 @@ footer {
         margin-top: 6px
     }
 
+    .popover::before {
+        display: none
+    }
+
     summary::before {
         content: "+";
         position: static;
@@ -1265,14 +1316,435 @@ footer {
         content: "−"
     }
 
-    .gates li,
     .timeline li {
         grid-template-columns: 1fr
     }
 }
 
 @media(prefers-reduced-motion:reduce) {
-    .status {
+    .deep-link-target {
         animation: none
+    }
+}
+
+/* Structured settings form ------------------------------------------------- */
+
+.settings-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 0;
+    margin: 0 0 12px
+}
+
+.settings-nav a {
+    color: var(--muted);
+    text-decoration: none;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: .82rem;
+    border: 1px solid var(--line)
+}
+
+.settings-nav a:hover,
+.settings-nav a:focus-visible {
+    background: var(--tint);
+    color: var(--accent-ink)
+}
+
+.settings-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px
+}
+
+.settings-actions {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0;
+    background: var(--paper)
+}
+
+.settings-actions button {
+    padding: 7px 16px;
+    font: inherit;
+    font-size: .85rem;
+    color: #fff;
+    background: var(--accent);
+    border: 1px solid var(--accent-ink);
+    border-radius: 8px;
+    cursor: pointer
+}
+
+.settings-actions button:disabled {
+    opacity: .45;
+    cursor: default
+}
+
+.settings-actions #settings-discard {
+    color: var(--ink);
+    background: var(--bg);
+    border-color: var(--line)
+}
+
+.settings-dirty {
+    color: var(--warn);
+    font-size: .82rem
+}
+
+.settings-status {
+    min-height: 1.6em;
+    font-size: .85rem
+}
+
+.settings-status-ok {
+    color: var(--accent-ink)
+}
+
+.settings-status-warn {
+    color: var(--warn)
+}
+
+.settings-status-error {
+    color: var(--danger)
+}
+
+.settings-section {
+    border-top: 1px solid var(--line);
+    padding-top: 12px;
+    margin-top: 8px
+}
+
+.settings-section h4 {
+    font-size: .78rem;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 14px 0 6px
+}
+
+.settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px 20px;
+    margin: 8px 0
+}
+
+.setting-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0
+}
+
+.setting-label {
+    font-size: .82rem;
+    color: var(--ink);
+    font-weight: 600
+}
+
+.setting-field input[type="text"],
+.setting-field input[type="number"],
+.setting-field input[type="password"],
+.setting-field select,
+.secret-control input[type="text"],
+.secret-control input[type="password"],
+.secret-control select {
+    padding: 6px 10px;
+    font: inherit;
+    font-size: .88rem;
+    color: var(--ink);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    min-width: 0
+}
+
+.setting-field input:disabled,
+.setting-field select:disabled {
+    opacity: .6
+}
+
+.duration-input {
+    display: flex;
+    gap: 6px
+}
+
+.duration-input input[type="number"] {
+    flex: 1 1 auto;
+    min-width: 0
+}
+
+.setting-help {
+    color: var(--muted);
+    font-size: .78rem;
+    margin: 0
+}
+
+.setting-restart {
+    color: var(--warn);
+    font-size: .78rem;
+    margin: 0
+}
+
+.setting-error {
+    color: var(--danger);
+    font-size: .78rem;
+    margin: 0
+}
+
+.setting-source {
+    align-self: flex-start;
+    font-size: .7rem;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 1px 8px
+}
+
+.settings-policy {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin: 8px 0
+}
+
+.settings-policy > summary {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    cursor: pointer;
+    list-style: none
+}
+
+.settings-policy > summary::-webkit-details-marker {
+    display: none
+}
+
+.settings-policy > summary::before {
+    content: "+";
+    position: static;
+    color: var(--accent);
+    font-weight: bold
+}
+
+.settings-policy[open] > summary::before {
+    content: "−"
+}
+
+/* Secret source controls --------------------------------------------------- */
+
+.secret-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin: 10px 0
+}
+
+.secret-control {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--bg)
+}
+
+.secret-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px
+}
+
+.secret-label {
+    font-weight: 600;
+    font-size: .88rem
+}
+
+.secret-configured {
+    font-size: .72rem;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: #16a34a
+}
+
+.secret-unset {
+    font-size: .72rem;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--muted)
+}
+
+.secret-existing {
+    color: var(--muted);
+    font-size: .78rem;
+    margin: 0
+}
+
+.secret-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px
+}
+
+.secret-control[data-active-type="value"] .secret-field:not(.secret-field-value),
+.secret-control[data-active-type="env"] .secret-field:not(.secret-field-env),
+.secret-control[data-active-type="path"] .secret-field:not(.secret-field-path) {
+    display: none
+}
+
+.secret-cleared .secret-field,
+.secret-cleared .secret-type {
+    opacity: .5
+}
+
+.env-combo {
+    position: relative
+}
+
+.env-combo .env-search {
+    width: 100%
+}
+
+.env-options {
+    display: none;
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 15;
+    max-height: 220px;
+    overflow-y: auto;
+    list-style: none;
+    margin: 0;
+    padding: 4px;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: var(--shadow)
+}
+
+.env-combo.open .env-options {
+    display: block
+}
+
+.env-option {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: .82rem
+}
+
+.env-option:hover,
+.env-option[aria-selected="true"] {
+    background: var(--tint)
+}
+
+.env-option.env-missing .env-name {
+    color: var(--danger)
+}
+
+.env-option.env-empty .env-name {
+    color: var(--warn)
+}
+
+.env-marker {
+    font-size: .68rem;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--danger)
+}
+
+.env-option.env-empty .env-marker {
+    color: var(--warn)
+}
+
+.env-refresh {
+    align-self: flex-start;
+    padding: 4px 10px;
+    font: inherit;
+    font-size: .78rem;
+    color: var(--accent-ink);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    cursor: pointer
+}
+
+.secret-clear {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: .8rem;
+    color: var(--danger)
+}
+
+.settings-raw {
+    margin-top: 16px;
+    border-top: 1px dashed var(--line);
+    padding-top: 10px
+}
+
+.settings-raw > summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    list-style: none;
+    font-size: .8rem;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--accent-ink)
+}
+
+.settings-raw > summary::-webkit-details-marker {
+    display: none
+}
+
+.settings-raw > summary::before {
+    content: "+";
+    position: static;
+    color: var(--accent);
+    font-weight: bold
+}
+
+.settings-raw[open] > summary::before {
+    content: "−"
+}
+
+.theme-toggle {
+    align-self: flex-start;
+    padding: 6px 14px;
+    font: inherit;
+    font-size: .85rem;
+    color: var(--ink);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    cursor: pointer
+}
+
+.deep-link-target {
+    animation: deep-link-pulse 1.6s ease-out 1
+}
+
+@keyframes deep-link-pulse {
+    0% {
+        box-shadow: 0 0 0 3px var(--accent)
+    }
+
+    100% {
+        box-shadow: 0 0 0 0 transparent
     }
 }

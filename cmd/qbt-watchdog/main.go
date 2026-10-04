@@ -94,22 +94,14 @@ func run(args []string, out, stderr io.Writer) int {
 		return nil
 	}
 	editor := config.NewEditor(manager.Path())
+	editor.SetCurrent(manager.Current)
+	settings := config.NewService(editor, manager, commit)
 	saver := web.ConfigSaverFunc{
-		ReadFunc: editor.Read,
-		SaveFunc: func(raw []byte, stamp string) (string, config.Status, error) {
-			newStamp, err := editor.SaveRaw(raw, stamp)
-			if err != nil {
-				return "", config.Status{}, err
-			}
-			next, err := config.Load(manager.Path())
-			if err != nil {
-				return newStamp, manager.Status(), err
-			}
-			if err := manager.Reload(next, commit); err != nil {
-				return newStamp, manager.Status(), err
-			}
-			return newStamp, manager.Status(), nil
-		},
+		ReadFunc:        editor.Read,
+		SaveFunc:        settings.SaveRaw,
+		SettingsFunc:    settings.Settings,
+		PatchFunc:       settings.Patch,
+		EnvironmentFunc: settings.Environment,
 	}
 	server.Handler = web.DynamicHandlerWithActions(service.Config, service.Snapshot, metrics, saver, service)
 	watchDone := make(chan struct{})

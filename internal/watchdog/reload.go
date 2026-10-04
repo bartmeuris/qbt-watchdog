@@ -98,6 +98,14 @@ func (s *Service) Apply(c config.Config, prepare func(config.Config) (Client, er
 		s.state.Tracked = map[string]store.Episode{}
 		s.state.SeedObserved = map[string]bool{}
 		s.torrents = nil
+		// Rows and the accepted-list metadata are cleared together, so the UI
+		// can never show one endpoint's torrents under another's timestamp.
+		s.view.LastTorrentListSuccess = nil
+		s.view.TorrentDataStale = false
+		s.view.PollError = ""
+		s.view.PollDiagnostic = nil
+		s.view.QBTVersion = ""
+		s.view.WebAPIVersion = ""
 	}
 	if s.c.SafetyKey() != c.SafetyKey() || s.c.Username != c.Username || s.c.Password != c.Password || s.c.TLSCAFile != c.TLSCAFile || s.c.TLSInsecure != c.TLSInsecure || !bytes.Equal(s.c.TLSCAPEM, c.TLSCAPEM) {
 		s.resetTimers()

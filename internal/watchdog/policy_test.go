@@ -142,6 +142,8 @@ func TestCompletedNoDataPolicyIsNarrow(t *testing.T) {
 		{"manual partial deselect has size", func(t *qbt.Torrent) { t.Size = 256 }},
 		{"downloaded then deselected has size", func(t *qbt.Torrent) { t.Size, t.Downloaded = 1, 0 }},
 		{"empty torrent has no total", func(t *qbt.Torrent) { t.TotalSize = 0 }},
+		{"unknown total size sentinel", func(t *qbt.Torrent) { t.TotalSize = -1 }},
+		{"unknown size and total sentinels", func(t *qbt.Torrent) { t.Size, t.TotalSize = -1, -1 }},
 		{"missing files state", func(t *qbt.Torrent) { t.State = "missingFiles" }},
 		{"checking up state", func(t *qbt.Torrent) { t.State = "checkingUP" }},
 		{"paused down state", func(t *qbt.Torrent) { t.State = "pausedDL" }},

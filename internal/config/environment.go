@@ -4,9 +4,25 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 )
+
+// effectiveEnvironment merges the process snapshot over the adjacent .env
+// fallback, with process values (including empty ones) taking precedence. It is
+// the single definition of the environment the loader sees, shared by Load and
+// the editor's environment metadata.
+func effectiveEnvironment(path string, process map[string]string) (map[string]string, error) {
+	environment, err := readDotEnv(filepath.Join(filepath.Dir(path), ".env"))
+	if err != nil {
+		return nil, err
+	}
+	for name, value := range process {
+		environment[name] = value
+	}
+	return environment, nil
+}
 
 func environmentSnapshot(entries []string) map[string]string {
 	snapshot := make(map[string]string, len(entries))
@@ -105,7 +121,6 @@ func expandValues(value any, environment map[string]string) (any, error) {
 var credentialKeys = map[string]bool{
 	"qbt_username": true, "qbt_password": true, "qbt_password_file": true,
 	"qbt_api_key": true, "qbt_api_key_file": true,
-	"web_username": true, "web_password": true, "web_password_file": true,
 	"api_key": true, "api_key_file": true,
 }
 

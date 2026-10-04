@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -43,6 +44,13 @@ type Episode struct {
 	DryRunNotified    bool            `json:"dry_run_notified"`
 	DeleteRequestedAt *time.Time      `json:"delete_requested_at"`
 	Attempts          int             `json:"delete_attempts"`
+	// Name is the bounded last-known torrent name for this episode. It is
+	// persisted alongside a pending deletion so the later confirmation event
+	// can still name the torrent after qBittorrent has forgotten it. The field
+	// is additive and optional: records written before it existed load with an
+	// empty name, and the renderer then falls back to a hash-based label
+	// instead of a blank.
+	Name string `json:"name,omitempty"`
 }
 type Counters struct {
 	Deletions      uint64 `json:"deletions"`
@@ -58,9 +66,16 @@ type Event struct {
 	Name            string          `json:"name"`
 	ShortHash       string          `json:"short_hash"`
 	CommandID       int64           `json:"command_id,omitempty"`
-	DryRun          bool            `json:"dry_run"`
-	Outcome         string          `json:"outcome"`
-	Error           string          `json:"error,omitempty"`
+	// ID is a stable per-event presentation identity, unique for the lifetime
+	// of the state file. It keeps consecutive events that share a command or a
+	// clock tick distinct during keyed client updates. The field is additive
+	// and optional: retained events written before it existed carry no ID here,
+	// and the renderer derives a deterministic fallback from their other
+	// fields.
+	ID      string `json:"id,omitempty"`
+	DryRun  bool   `json:"dry_run"`
+	Outcome string `json:"outcome"`
+	Error   string `json:"error,omitempty"`
 }
 
 // Bounded normalizes free text at audit creation and state load. Vocabulary
@@ -70,6 +85,7 @@ func (e Event) Bounded() Event {
 	e.Name = boundedText(e.Name, EventTextLimit)
 	e.Error = boundedText(e.Error, EventTextLimit)
 	e.ShortHash = boundedText(e.ShortHash, EventHashLimit)
+	e.ID = boundedText(e.ID, EventHashLimit)
 	e.Time = e.Time.UTC()
 	return e
 }
@@ -100,7 +116,12 @@ type State struct {
 	SchemaVersion     int                    `json:"schema_version"`
 	Tracked           map[string]Episode     `json:"tracked"`
 	Counters          Counters               `json:"counters"`
-	History           []Event                `json:"history"`
+	// EventSeq issues the next Event.ID. It is monotonic and persisted, so an
+	// identity is never reused across restarts or after history eviction. The
+	// field is additive: older state loads with zero, and loaded history is
+	// scanned to raise it above any ID already present.
+	EventSeq uint64  `json:"event_seq,omitempty"`
+	History  []Event `json:"history"`
 }
 
 func Empty() State {
@@ -147,7 +168,7 @@ func valid(s State, now time.Time) bool {
 		if e.Policy != "" && !e.Policy.Valid() {
 			return false
 		}
-		if !qbt.ValidHash(hash) || hash != strings.ToLower(hash) || e.FirstSeen.IsZero() || e.LastSeen.Before(e.FirstSeen) || e.LastSeen.After(now) || e.Attempts < 0 || e.Attempts > MaxAttempts {
+		if !qbt.ValidHash(hash) || hash != strings.ToLower(hash) || e.FirstSeen.IsZero() || e.LastSeen.Before(e.FirstSeen) || e.LastSeen.After(now) || e.Attempts < 0 || e.Attempts > MaxAttempts || len(e.Name) > EventTextLimit {
 			return false
 		}
 		if e.DeleteRequestedAt != nil && (e.Attempts == 0 || e.DeleteRequestedAt.IsZero() || e.DeleteRequestedAt.After(now)) {
@@ -164,7 +185,7 @@ func valid(s State, now time.Time) bool {
 		if e.EffectiveAction != "" && e.EffectiveAction != config.Warn && e.EffectiveAction != config.Delete && e.EffectiveAction != config.DeleteFile {
 			return false
 		}
-		if e.Time.IsZero() || e.Time.After(now) || len(e.ShortHash) > EventHashLimit || !validOutcome(e.Outcome) || len(e.Error) > EventTextLimit || len(e.Name) > EventTextLimit {
+		if e.Time.IsZero() || e.Time.After(now) || len(e.ShortHash) > EventHashLimit || len(e.ID) > EventHashLimit || !validOutcome(e.Outcome) || len(e.Error) > EventTextLimit || len(e.Name) > EventTextLimit {
 			return false
 		}
 		// Older layouts named their events after deletion rather than after
@@ -225,6 +246,9 @@ func migrate(s State, now time.Time) State {
 	// Schema 2 named events after deletion rather than after the policy
 	// action, so the old vocabulary is dropped instead of relabelled.
 	s.History = []Event{}
+	// The identity sequence restarts with the dropped history; any surviving
+	// event IDs would otherwise be reissued.
+	s.EventSeq = 0
 	// The partition and the episode clock are re-proven from scratch under
 	// whatever rules this build applies.
 	for hash, e := range s.Tracked {
@@ -257,6 +281,10 @@ func (f File) Load(now time.Time) (State, error) {
 		for i := range s.History {
 			s.History[i] = s.History[i].Bounded()
 		}
+		for hash, e := range s.Tracked {
+			e.Name = boundedText(e.Name, EventTextLimit)
+			s.Tracked[hash] = e
+		}
 	}
 	if !decoded || !valid(s, now) {
 		backup := f.Path + "." + now.UTC().Format("20060102T150405.000000000") + ".corrupt"
@@ -277,6 +305,13 @@ func (f File) Load(now time.Time) (State, error) {
 	}
 	if len(s.History) > f.HistoryLimit {
 		s.History = s.History[len(s.History)-f.HistoryLimit:]
+	}
+	// Never reissue an identity already present in the retained history. This
+	// also heals a state file written without the sequence field.
+	for _, e := range s.History {
+		if n, err := strconv.ParseUint(e.ID, 10, 64); err == nil && n > s.EventSeq {
+			s.EventSeq = n
+		}
 	}
 	return s, nil
 }

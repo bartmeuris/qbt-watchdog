@@ -25,8 +25,17 @@ type serviceIndicator struct {
 	Status      string // healthy | failed | stale | disabled | unknown
 	StatusLabel string
 	LastContact *time.Time
-	Error       string
-	LastAction  string
+	// LastContactLabel names what LastContact actually is. For qBittorrent it is
+	// the last successful poll, never the last network contact.
+	LastContactLabel string
+	Error            string
+	LastAction       string
+	// Rejected marks a response-validation failure, which is distinct from a
+	// connection failure: qBittorrent answered, but the data failed validation.
+	Rejected      bool
+	Explanation   string
+	QBTVersion    string
+	WebAPIVersion string
 }
 
 // serviceIndicators builds the header dots: qBittorrent first, then each Arr
@@ -41,8 +50,15 @@ func serviceIndicators(s watchdog.Snapshot) []serviceIndicator {
 }
 
 func qbtIndicator(s watchdog.Snapshot) serviceIndicator {
-	ind := serviceIndicator{ID: "qbt", Name: "qBittorrent", Error: "—", LastAction: "—"}
+	ind := serviceIndicator{ID: "qbt", Name: "qBittorrent", Error: "—", LastAction: "—", LastContactLabel: "Last successful poll"}
 	switch {
+	case s.PollDiagnostic != nil && s.PollDiagnostic.Kind == watchdog.PollErrorResponseRejected:
+		ind.Status, ind.StatusLabel = "failed", "Response rejected"
+		ind.Error = s.PollError
+		ind.Rejected = true
+		ind.Explanation = "qBittorrent responded, but the returned torrent data failed validation."
+		ind.QBTVersion = s.QBTVersion
+		ind.WebAPIVersion = s.WebAPIVersion
 	case s.PollError != "":
 		ind.Status, ind.StatusLabel = "failed", "Failed"
 		ind.Error = s.PollError
@@ -61,7 +77,7 @@ func qbtIndicator(s watchdog.Snapshot) serviceIndicator {
 }
 
 func arrIndicator(it watchdog.IntegrationStatus, history []store.Event) serviceIndicator {
-	ind := serviceIndicator{ID: string(it.Kind), Name: kindLabel(it.Kind), Error: "—", LastAction: "—"}
+	ind := serviceIndicator{ID: string(it.Kind), Name: kindLabel(it.Kind), Error: "—", LastAction: "—", LastContactLabel: "Last contact"}
 	switch {
 	case !it.Enabled:
 		ind.Status, ind.StatusLabel = "disabled", "Disabled"
@@ -94,6 +110,34 @@ func latestEvent(history []store.Event, integration config.ArrKind) (store.Event
 		}
 	}
 	return store.Event{}, false
+}
+
+// torrentListNotice describes the torrent list when it is not a plain accepted
+// list. Kind is a closed vocabulary the template maps to a class; the text is
+// the compact operator-facing sentence. Extended diagnostics live in the
+// service popover, not here.
+type torrentNotice struct {
+	Kind   string // waiting | rejected | stale
+	Text   string
+	Since  *time.Time
+	Reason string
+}
+
+// torrentListNotice returns nil for an accepted list (rows or the normal empty
+// state). It never uses len(Torrents) to decide whether data was ever received:
+// LastTorrentListSuccess is the authoritative marker, and it survives a reload
+// that resets LastSuccess.
+func torrentListNotice(s watchdog.Snapshot) *torrentNotice {
+	if s.TorrentDataStale {
+		return &torrentNotice{Kind: "stale", Since: s.LastTorrentListSuccess, Reason: s.PollError}
+	}
+	if s.LastTorrentListSuccess != nil {
+		return nil
+	}
+	if s.PollDiagnostic != nil && s.PollDiagnostic.Kind == watchdog.PollErrorResponseRejected {
+		return &torrentNotice{Kind: "rejected", Text: "No valid torrent snapshot yet — qBittorrent response rejected."}
+	}
+	return &torrentNotice{Kind: "waiting", Text: "Waiting for the first torrent snapshot."}
 }
 
 // gateItem is one step of the horizontal evaluation strip. Symbol and Class are
@@ -271,21 +315,79 @@ func decisionSentence(row watchdog.Row) string {
 	return ""
 }
 
-// torrentStates lists the distinct qBittorrent states in the snapshot, sorted,
-// for the client-side state filter.
-func torrentStates(s watchdog.Snapshot) []string {
-	seen := map[string]bool{}
+// stateOption is one choice in the torrent state filter: the exact qBittorrent
+// state value (kept verbatim so a row can always be matched against the JSON,
+// the logs and the metrics), a readable label, and the number of torrents in
+// the full current snapshot that carry it.
+type stateOption struct {
+	Value string
+	Label string
+	Count int
+}
+
+// torrentStateCatalog is the fixed, ordered set of qBittorrent states the
+// filter always offers. It is deliberately independent of the current snapshot:
+// a state with zero torrents still gets a choice, so the dropdown never
+// collapses to "All states" on an empty poll and an operator's selection is
+// never silently dropped when its count reaches zero. The values are the exact
+// qBittorrent WebUI state strings; the labels are the readable form.
+var torrentStateCatalog = []stateOption{
+	{Value: "error", Label: "Error"},
+	{Value: "missingFiles", Label: "Missing files"},
+	{Value: "allocating", Label: "Allocating"},
+	{Value: "checkingDL", Label: "Checking download"},
+	{Value: "checkingUP", Label: "Checking upload"},
+	{Value: "downloading", Label: "Downloading"},
+	{Value: "forcedDL", Label: "Forced download"},
+	{Value: "forcedMetaDL", Label: "Forced metadata"},
+	{Value: "forcedUP", Label: "Forced upload"},
+	{Value: "metaDL", Label: "Downloading metadata"},
+	{Value: "moving", Label: "Moving"},
+	{Value: "pausedDL", Label: "Paused download"},
+	{Value: "pausedUP", Label: "Paused upload"},
+	{Value: "queuedDL", Label: "Queued download"},
+	{Value: "queuedUP", Label: "Queued upload"},
+	{Value: "stalledDL", Label: "Stalled download"},
+	{Value: "stalledUP", Label: "Stalled upload"},
+	{Value: "stoppedDL", Label: "Stopped download"},
+	{Value: "stoppedUP", Label: "Stopped upload"},
+	{Value: "unknown", Label: "Unknown"},
+	{Value: "uploading", Label: "Uploading"},
+}
+
+// torrentStateOptions returns the fixed catalog with counts taken from the full
+// current torrent snapshot. Counts are computed here, before any name search,
+// so the number beside a state never changes as the operator types. A state the
+// catalog does not recognize is appended (sorted, labelled with its raw value)
+// rather than hidden, so a torrent in an unexpected state still has a filter
+// choice and can never be stranded.
+func torrentStateOptions(s watchdog.Snapshot) []stateOption {
+	counts := map[string]int{}
 	for _, row := range s.Torrents {
 		if row.State != "" {
-			seen[row.State] = true
+			counts[row.State]++
 		}
 	}
-	states := make([]string, 0, len(seen))
-	for st := range seen {
-		states = append(states, st)
+
+	options := make([]stateOption, 0, len(torrentStateCatalog)+len(counts))
+	known := make(map[string]bool, len(torrentStateCatalog))
+	for _, entry := range torrentStateCatalog {
+		known[entry.Value] = true
+		entry.Count = counts[entry.Value]
+		options = append(options, entry)
 	}
-	sort.Strings(states)
-	return states
+
+	unrecognized := make([]string, 0)
+	for state := range counts {
+		if !known[state] {
+			unrecognized = append(unrecognized, state)
+		}
+	}
+	sort.Strings(unrecognized)
+	for _, state := range unrecognized {
+		options = append(options, stateOption{Value: state, Label: state, Count: counts[state]})
+	}
+	return options
 }
 
 // progressSymbol maps a timeline step status to a compact glyph for the

@@ -1,5 +1,27 @@
 # Build Specification: `qbt-watchdog`
 
+> **SUPERSEDED — historical build specification.** This document records the original
+> implementation brief and no longer describes the shipped program. Keep it for
+> provenance, not as a reference. Known divergences from the current build:
+>
+> - The UI is now multipage (`/` Overview, `/policies` Active policies, `/activity`
+>   Activity, `/settings` Settings) with a structured, source-preserving settings form
+>   and Value/Env var/Path secret source controls, not the single dashboard page described here.
+> - Built-in web authentication was removed. `web_username`, `web_password`,
+>   `web_password_file` and `metrics_public` no longer exist; access control is delegated
+>   to a reverse proxy and `/metrics` is unauthenticated. A file that still carries those
+>   keys is rejected with a migration error.
+> - Configuration is file-only: there are no per-setting CLI flags or `QBTW_*`
+>   environment variables, only `--config`, `--once`, and the `version`/`healthcheck`
+>   subcommands plus `QBTW_CONFIG`.
+> - The single `metadata` policy grew into six policies (`metadata`,
+>   `stalled_no_seeders`, `stalled_seeders_seen`, `stalled_partial`, `completed_no_data`,
+>   `stopped_arr_managed`), plus optional Sonarr/Radarr recovery.
+> - Live fragments are reconciled by stable key, and the state schema is now version 4.
+>
+> See [`README.md`](README.md) and [`config.example.yaml`](config.example.yaml) for the
+> current behavior.
+
 ## Instruction to the implementation agent
 
 Implement the complete project described below. Treat this document as the source of truth. Produce working code, tests, documentation, and a production-ready multi-stage Docker image; do not stop at a design, pseudocode, or scaffolding.

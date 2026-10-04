@@ -92,33 +92,83 @@ type Summary struct {
 	WouldDelete     int `json:"would_delete"`
 	DeleteRequested int `json:"delete_requested"`
 }
+
+// Poll stages name where in a poll cycle a failure occurred. They are a closed
+// vocabulary, so a consumer can tell an initial-list rejection from a later
+// targeted read without parsing the message.
+const (
+	PollStageBoot          = "boot"
+	PollStageVersions      = "versions"
+	PollStageInitialList   = "initial_list"
+	PollStageCandidateRead = "candidate_read"
+	PollStageRecheck       = "recheck"
+	PollStageDelete        = "delete"
+	PollStageTagSync       = "tag_sync"
+	PollStageCancelled     = "cancelled"
+)
+
+// Poll error kinds. response_rejected is reserved for the typed qbt validation
+// errors; every other failure is poll_failed.
+const (
+	PollErrorResponseRejected = "response_rejected"
+	PollErrorPollFailed       = "poll_failed"
+)
+
+// PollDiagnostic is the safe, structured half of a poll failure. It carries no
+// credentials, URLs, cookies, headers, torrent names/paths/tags, raw bodies or
+// full hashes; only static field names, numeric values, indices and validated
+// short hashes.
+type PollDiagnostic struct {
+	Kind       string `json:"kind"`
+	Stage      string `json:"stage"`
+	Code       string `json:"code,omitempty"`
+	Operation  string `json:"operation,omitempty"`
+	Index      *int   `json:"index,omitempty"`
+	Torrent    string `json:"torrent,omitempty"`
+	Field      string `json:"field,omitempty"`
+	Value      string `json:"value,omitempty"`
+	Constraint string `json:"constraint,omitempty"`
+	Related    string `json:"related,omitempty"`
+}
+
 type Snapshot struct {
 	Integrations []IntegrationStatus `json:"integrations"`
 	RecoveryJobs []RecoveryStatus    `json:"recovery_jobs"`
 	// ConfigStatus is the reload health owned by config.Manager. The service
 	// keeps no copy of it, so the UI, the status payload, the metrics and
 	// /readyz can never report three different answers.
-	ConfigStatus     config.Status       `json:"config"`
-	Policies         []PolicyView        `json:"policies"`
-	SchemaVersion    int                 `json:"schema_version"`
-	Build            observability.Build `json:"build"`
-	DryRun           bool                `json:"dry_run"`
-	TagSync          TagSyncStatus       `json:"tag_sync"`
-	QBTUp            bool                `json:"qbt_up"`
-	QBTVersion       string              `json:"qbt_version"`
-	WebAPIVersion    string              `json:"webapi_version"`
-	LastSuccess      *time.Time          `json:"last_successful_poll"`
-	PollError        string              `json:"poll_error"`
-	NextPoll         *time.Time          `json:"next_poll"`
-	PersistenceError string              `json:"persistence_error"`
-	StateLoadWarning string              `json:"state_load_warning"`
-	UpdatedAt        time.Time           `json:"updated_at"`
-	Summary          Summary             `json:"summary"`
-	SinceStartup     store.Counters      `json:"since_startup"`
-	Lifetime         store.Counters      `json:"lifetime"`
-	Torrents         []Row               `json:"torrents"`
-	History          []store.Event       `json:"history"`
-	RefreshSeconds   float64             `json:"refresh_seconds"`
+	ConfigStatus  config.Status       `json:"config"`
+	Policies      []PolicyView        `json:"policies"`
+	SchemaVersion int                 `json:"schema_version"`
+	Build         observability.Build `json:"build"`
+	DryRun        bool                `json:"dry_run"`
+	TagSync       TagSyncStatus       `json:"tag_sync"`
+	QBTUp         bool                `json:"qbt_up"`
+	QBTVersion    string              `json:"qbt_version"`
+	WebAPIVersion string              `json:"webapi_version"`
+	LastSuccess   *time.Time          `json:"last_successful_poll"`
+	PollError     string              `json:"poll_error"`
+	// PollDiagnostic is the safe, structured half of a poll failure. It is nil
+	// when the latest poll succeeded and is cleared on recovery.
+	PollDiagnostic *PollDiagnostic `json:"poll_diagnostic,omitempty"`
+	// LastTorrentListSuccess is set only after the entire initial torrent list
+	// passes decode and validation, including a valid empty list. It is the
+	// authoritative "data was ever received" marker; len(Torrents) is not.
+	LastTorrentListSuccess *time.Time `json:"last_torrent_list_success,omitempty"`
+	// TorrentDataStale is true when the displayed rows come from an earlier
+	// accepted list and the latest initial list was rejected. It is never set
+	// by a later targeted-read failure, which leaves the accepted list current.
+	TorrentDataStale bool           `json:"torrent_data_stale,omitempty"`
+	NextPoll         *time.Time     `json:"next_poll"`
+	PersistenceError string         `json:"persistence_error"`
+	StateLoadWarning string         `json:"state_load_warning"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	Summary          Summary        `json:"summary"`
+	SinceStartup     store.Counters `json:"since_startup"`
+	Lifetime         store.Counters `json:"lifetime"`
+	Torrents         []Row          `json:"torrents"`
+	History          []store.Event  `json:"history"`
+	RefreshSeconds   float64        `json:"refresh_seconds"`
 	// Limits and Exclusions mirror the running configuration so a consumer can
 	// explain decisions without reaching into config; Warnings are the loud
 	// safety notices derived from it. All are additive and detached on read.
@@ -245,6 +295,8 @@ func (s *Service) Snapshot() Snapshot {
 	v.Exclusions.ExcludeCategories = slices.Clone(v.Exclusions.ExcludeCategories)
 	v.Exclusions.ExcludeTags = slices.Clone(v.Exclusions.ExcludeTags)
 	v.LastSuccess = cloneTime(v.LastSuccess)
+	v.LastTorrentListSuccess = cloneTime(v.LastTorrentListSuccess)
+	v.PollDiagnostic = cloneDiagnostic(v.PollDiagnostic)
 	v.NextPoll = cloneTime(v.NextPoll)
 	for i := range v.Torrents {
 		v.Torrents[i].FirstSeen = cloneTime(v.Torrents[i].FirstSeen)
@@ -263,6 +315,18 @@ func cloneTime(t *time.Time) *time.Time {
 		return nil
 	}
 	copy := *t
+	return &copy
+}
+
+func cloneDiagnostic(d *PollDiagnostic) *PollDiagnostic {
+	if d == nil {
+		return nil
+	}
+	copy := *d
+	if d.Index != nil {
+		index := *d.Index
+		copy.Index = &index
+	}
 	return &copy
 }
 
@@ -511,12 +575,21 @@ func (s *Service) decision(t qbt.Torrent, e store.Episode, now time.Time) string
 	return s.evaluate(t, e, now).Decision
 }
 
+// nextEventID issues a stable, monotonic event identity. The sequence lives in
+// the persisted state, so identities are unique across restarts and are never
+// reused after history eviction. Callers must hold s.mu (all do: events are
+// emitted from Poll and from recovery, which share the poll lock).
+func (s *Service) nextEventID() string {
+	s.state.EventSeq++
+	return strconv.FormatUint(s.state.EventSeq, 10)
+}
+
 func (s *Service) event(action, outcome string, t qbt.Torrent, detail string) {
 	id := s.policy(t)
 	if id == "" {
 		id = s.state.Tracked[t.Hash].Policy
 	}
-	e := (store.Event{Policy: id, EffectiveAction: s.c.EffectiveAction(id), Time: s.clock.Now().UTC(), Action: action, Outcome: outcome, Name: t.Name, ShortHash: qbt.ShortHash(t.Hash), DryRun: s.c.DryRun, Error: detail}).Bounded()
+	e := (store.Event{Policy: id, EffectiveAction: s.c.EffectiveAction(id), Time: s.clock.Now().UTC(), Action: action, Outcome: outcome, Name: t.Name, ShortHash: qbt.ShortHash(t.Hash), ID: s.nextEventID(), DryRun: s.c.DryRun, Error: detail}).Bounded()
 	s.state.History = append(s.state.History, e)
 	if len(s.state.History) > s.c.HistoryLimit {
 		s.state.History = s.state.History[len(s.state.History)-s.c.HistoryLimit:]
@@ -552,7 +625,11 @@ func (s *Service) endObservedEpisodes(ts []qbt.Torrent) {
 			if e.DeleteRequestedAt != nil {
 				s.state.Counters.Deletions++
 				s.startup.Deletions++
-				s.event("action_confirmed", "success", qbt.Torrent{Hash: hash}, "")
+				// Name the confirmation from the persisted episode: the torrent
+				// is already gone from qBittorrent, so its live name is no
+				// longer available. An empty persisted name (an older record)
+				// stays empty and the UI renders a hash-based fallback.
+				s.event("action_confirmed", "success", qbt.Torrent{Hash: hash, Name: e.Name}, "")
 			}
 			delete(s.state.Tracked, hash)
 			s.log.Debug("tracking stopped", "event", "tracking_stop", "hash", qbt.ShortHash(hash))
@@ -583,10 +660,17 @@ func (s *Service) reconcile(ts []qbt.Torrent, now time.Time) {
 			if repartitioned {
 				attempts = carriedAttempts(e)
 			}
-			e = store.Episode{Policy: id, FirstSeen: now, LastSeen: now, DeleteRequestedAt: e.DeleteRequestedAt, Attempts: attempts}
+			e = store.Episode{Policy: id, FirstSeen: now, LastSeen: now, DeleteRequestedAt: e.DeleteRequestedAt, Attempts: attempts, Name: e.Name}
 			s.log.Debug("policy episode start/reset", "event", "tracking_reset", "policy", id, "hash", qbt.ShortHash(t.Hash))
 		}
 		e.LastSeen = now
+		// Keep the last-known name bounded and current while the torrent is
+		// still observable, so a pending deletion retains it even if history
+		// evicts the request event or the process restarts. An empty live name
+		// never erases one already captured.
+		if t.Name != "" {
+			e.Name = store.BoundedText(t.Name, store.EventTextLimit)
+		}
 		if e.DeleteRequestedAt != nil && now.Sub(*e.DeleteRequestedAt) >= s.c.DeleteConfirmationTimeout {
 			e.DeleteRequestedAt = nil
 		}
@@ -594,12 +678,56 @@ func (s *Service) reconcile(ts []qbt.Torrent, now time.Time) {
 	}
 }
 
-func (s *Service) fail(err error) {
+func (s *Service) fail(stage string, err error) {
 	s.view.PollError = err.Error()
 	s.view.QBTUp = false
+	s.view.PollDiagnostic = diagnosticFor(stage, err)
+	// A rejected initial list leaves the previously accepted rows on screen but
+	// marks them stale. A versions failure before any list this cycle is equally
+	// stale once data has ever been accepted. A later targeted-read failure
+	// happens after this cycle's list was accepted, so the rows stay current.
+	if s.view.LastTorrentListSuccess != nil && (stage == PollStageInitialList || stage == PollStageVersions) {
+		s.view.TorrentDataStale = true
+	}
 	s.metrics.Up.Set(0)
 	s.metrics.PollErrors.Inc()
-	s.log.Warn("poll failed", "event", "poll_error", "error", err)
+	attrs := []any{"event", "poll_error", "error", err, "poll_stage", stage}
+	if d := s.view.PollDiagnostic; d != nil {
+		attrs = append(attrs, "error_kind", d.Kind)
+		if d.Field != "" {
+			attrs = append(attrs, "field", d.Field)
+		}
+		if d.Torrent != "" {
+			attrs = append(attrs, "torrent", d.Torrent)
+		}
+	}
+	s.log.Warn("poll failed", attrs...)
+}
+
+// diagnosticFor classifies a poll failure without ever inspecting the English
+// message. A typed qbt.ResponseError becomes a response_rejected diagnostic
+// carrying its safe fields; anything else is a generic poll_failed.
+func diagnosticFor(stage string, err error) *PollDiagnostic {
+	var rejected *qbt.ResponseError
+	if errors.As(err, &rejected) {
+		d := &PollDiagnostic{
+			Kind:       PollErrorResponseRejected,
+			Stage:      stage,
+			Code:       rejected.Code,
+			Operation:  rejected.Operation,
+			Torrent:    rejected.ShortHash,
+			Field:      rejected.Field,
+			Value:      rejected.Value,
+			Constraint: rejected.Constraint,
+			Related:    rejected.Related,
+		}
+		if rejected.Index >= 0 {
+			index := rejected.Index
+			d.Index = &index
+		}
+		return d
+	}
+	return &PollDiagnostic{Kind: PollErrorPollFailed, Stage: stage}
 }
 func (s *Service) persist() {
 	_ = s.persistState()
@@ -646,20 +774,32 @@ func (s *Service) Poll(ctx context.Context) error {
 	defer func() { s.metrics.Duration.Observe(time.Since(started).Seconds()) }()
 	defer func() { s.persist(); s.publish(nil) }()
 	if err := s.tagPrefixBootError(); err != nil {
-		s.fail(err)
+		s.fail(PollStageBoot, err)
 		return err
 	}
 	app, api, err := s.client.Versions(ctx)
 	if err != nil {
-		s.fail(err)
+		s.fail(PollStageVersions, err)
 		return err
 	}
+	// Record the versions before the list is attempted, so a list-validation
+	// failure never suppresses the version information an operator needs to
+	// identify a compatibility problem.
+	if s.view.QBTVersion != app || s.view.WebAPIVersion != api {
+		s.log.Info("qBittorrent versions detected", "event", "qbt_versions", "application_version", app, "webapi_version", api)
+	}
+	s.view.QBTVersion = app
+	s.view.WebAPIVersion = api
 	ts, err := s.client.List(ctx)
 	if err != nil {
-		s.fail(err)
+		s.fail(PollStageInitialList, err)
 		return err
 	}
 	now := s.clock.Now().UTC()
+	// The entire initial list passed decode and validation (a valid empty list
+	// included), so data has been received and is no longer stale.
+	s.view.LastTorrentListSuccess = &now
+	s.view.TorrentDataStale = false
 	// Determine candidates without generating externally visible events.
 	s.expireRecovery(now)
 	s.confirmRecovery(ts, now)
@@ -721,7 +861,7 @@ func (s *Service) Poll(ctx context.Context) error {
 	for _, t := range candidates {
 		confirmed, e := s.client.Get(ctx, t.Hash)
 		if e != nil {
-			s.fail(e)
+			s.fail(PollStageCandidateRead, e)
 			return e
 		}
 		fresh[t.Hash] = confirmed
@@ -729,16 +869,12 @@ func (s *Service) Poll(ctx context.Context) error {
 		s.observeNegative(t.Hash, confirmed, s.clock.Now())
 	}
 	if err := ctx.Err(); err != nil {
-		s.fail(err)
+		s.fail(PollStageCancelled, err)
 		return err
 	}
 	s.reconcile(s.torrents, now)
-	if s.view.QBTVersion != app || s.view.WebAPIVersion != api {
-		s.log.Info("qBittorrent versions detected", "event", "qbt_versions", "application_version", app, "webapi_version", api)
-	}
-	s.view.QBTVersion = app
-	s.view.WebAPIVersion = api
 	s.view.PollError = ""
+	s.view.PollDiagnostic = nil
 	s.view.QBTUp = true
 	s.view.LastSuccess = &now
 	s.metrics.Up.Set(1)
@@ -794,6 +930,13 @@ func (s *Service) Poll(ctx context.Context) error {
 		// that read from the mutation. Known-unsent reservations are released.
 		reserved := e
 		reserved.Attempts++
+		// Capture the torrent's name in the durable reservation, before the
+		// deletion request is issued. The confirmation event later reads it
+		// back from the persisted episode; an empty live name falls back to the
+		// name reconcile already recorded.
+		if confirmed.Name != "" {
+			reserved.Name = store.BoundedText(confirmed.Name, store.EventTextLimit)
+		}
 		s.state.Tracked[t.Hash] = reserved
 		s.prepareRecovery(*confirmed, e)
 		s.persist()
@@ -807,7 +950,7 @@ func (s *Service) Poll(ctx context.Context) error {
 		if err != nil {
 			s.releaseRecovery(t.Hash)
 			s.state.Tracked[t.Hash] = e
-			s.fail(err)
+			s.fail(PollStageRecheck, err)
 			return err
 		}
 		// Release the known-unsent reservation before retaining negative observations.
@@ -829,14 +972,14 @@ func (s *Service) Poll(ctx context.Context) error {
 		if err = ctx.Err(); err != nil {
 			s.releaseRecovery(t.Hash)
 			s.state.Tracked[t.Hash] = e
-			s.fail(err)
+			s.fail(PollStageCancelled, err)
 			return err
 		}
 		s.state.Tracked[t.Hash] = reserved
 		if err = s.client.Delete(ctx, t.Hash, effective == config.DeleteFile); err != nil {
 			s.releaseRecovery(t.Hash)
 			s.event("action_failed", "failed", t, "delete request failed")
-			s.fail(err)
+			s.fail(PollStageDelete, err)
 			return err
 		}
 		requested := s.clock.Now().UTC()
@@ -849,7 +992,7 @@ func (s *Service) Poll(ctx context.Context) error {
 		s.persist()
 	}
 	if err := s.syncWatchdogTags(ctx, now); err != nil {
-		s.fail(err)
+		s.fail(PollStageTagSync, err)
 		return err
 	}
 	s.log.Debug("poll succeeded", "event", "poll_success", "torrents", len(ts))

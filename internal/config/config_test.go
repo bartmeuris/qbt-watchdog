@@ -39,7 +39,7 @@ func TestDefaultsAndMinimalCommandLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.DryRun || !c.Once || !c.MetricsPublic {
+	if !c.DryRun || !c.Once {
 		t.Fatal("unsafe defaults")
 	}
 	if c.PollInterval != 30*time.Second || c.MaxObservationGap != 90*time.Second || c.HTTPTimeout != 10*time.Second {
@@ -160,9 +160,8 @@ func TestStrictValidationRejectsEveryInvalidSetting(t *testing.T) {
 		"qbt_url: 'ftp://host'", "qbt_url: 'http://user:SECRET@host'", "qbt_url: 'http://host?SECRET=x'",
 		"qbt_url: 'http://host#SECRET'", "qbt_url: 'http://host:99999'", "qbt_url: ''", "qbt_url: 'http:///path'",
 		// credentials
-		"qbt_username: 'u'", "web_password: 'SECRET'", "web_username: 'u'",
+		"qbt_username: 'u'",
 		"qbt_password: 'SECRET'\nqbt_password_file: '/SECRET'",
-		"web_password: 'SECRET'\nweb_password_file: '/SECRET'",
 		"qbt_password_file: '/not/a/SECRET/file'",
 		"qbt_username: 'u'\nqbt_password_file: '/not/a/SECRET/file'",
 		// caps
@@ -173,7 +172,7 @@ func TestStrictValidationRejectsEveryInvalidSetting(t *testing.T) {
 		"max_observation_gap: ''", "max_observation_gap: '-1s'", "http_timeout: '0s'",
 		"delete_confirmation_timeout: '0s'", "ui_refresh_interval: '0s'", "readiness_max_age: '0s'",
 		// types
-		"dry_run: 'false'", "dry_run: 0", "metrics_public: 'true'", "tls_insecure_skip_verify: 1",
+		"dry_run: 'false'", "dry_run: 0", "tls_insecure_skip_verify: 1",
 		"include_categories: 'a,b'", "exclude_tags: [1]", "history_limit: 'many'",
 		// presentation and binding
 		"log_level: 'trace'", "log_format: 'xml'", "listen: 'invalid'", "listen: ':99999'", "state_file: ''",
@@ -219,6 +218,36 @@ func TestStrictValidationRejectsEveryInvalidSetting(t *testing.T) {
 				t.Fatal("error leaked file content", err)
 			}
 		})
+	}
+}
+
+func TestRemovedWebAuthenticationProducesMigrationError(t *testing.T) {
+	for _, tc := range []struct {
+		format Format
+		body   string
+	}{
+		{YAML, minimal + "web_username: 'operator'\n"},
+		{YAML, minimal + "web_password: 'SECRET'\n"},
+		{YAML, minimal + "web_password_file: '/SECRET'\n"},
+		{YAML, minimal + "web_username: ''\nweb_password: ''\n"},
+		{YAML, minimal + "metrics_public: false\n"},
+		{TOML, "qbt_url = 'http://host'\nweb_username = 'operator'\n"},
+	} {
+		_, err := Decode(tc.format, []byte(tc.body))
+		if err == nil {
+			t.Fatal("legacy web authentication accepted", tc.body)
+		}
+		message := err.Error()
+		if !strings.Contains(message, "removed") || !strings.Contains(message, "reverse proxy") {
+			t.Fatal("migration error is not actionable", message)
+		}
+		if strings.Contains(message, "SECRET") {
+			t.Fatal("migration error leaked a secret", message)
+		}
+	}
+	// Only the removed keys are flagged; a clean config still loads.
+	if _, err := Decode(YAML, []byte(minimal)); err != nil {
+		t.Fatal("clean configuration rejected", err)
 	}
 }
 
@@ -368,37 +397,86 @@ func TestSafetyKeyIncludesMatchTagsButNotTagPrefix(t *testing.T) {
 }
 
 func TestWarningsCoverEveryUnsafeSetting(t *testing.T) {
-	messages := func(c Config) string {
-		var b strings.Builder
-		for _, w := range c.Warnings() {
-			b.WriteString(w.Message)
-			b.WriteString(string(w.Policy))
-			b.WriteString("|")
-		}
-		return b.String()
-	}
-	if got := messages(decode(t, minimal+"listen: '127.0.0.1:8080'")); got != "" {
-		t.Fatal("safe defaults warned", got)
+	if warnings := decode(t, minimal+"listen: '127.0.0.1:8080'").Warnings(); len(warnings) != 0 {
+		t.Fatal("safe defaults warned", warnings)
 	}
 	unsafe := decode(t, minimal+"dry_run: false\ntls_insecure_skip_verify: true\npolicies:\n  stalled_partial:\n    action: 'delete_file'\n")
-	got := messages(unsafe)
-	for _, want := range []string{"DELETION ENABLED", "DELETE FILES ENABLED", string(StalledPartial), "TLS certificate verification disabled", "web UI exposed without authentication"} {
-		if !strings.Contains(got, want) {
-			t.Fatal("missing warning", want, got)
+	byCode := map[WarningCode]Warning{}
+	for _, w := range unsafe.Warnings() {
+		if w.Code == "" || w.Scope == "" {
+			t.Fatalf("warning lacks a stable identity: %+v", w)
+		}
+		byCode[w.Code] = w
+	}
+	// Each unsafe setting must be identifiable by code, scope, settings target
+	// and the human message, never by matching the message text.
+	cases := []struct {
+		code   WarningCode
+		scope  WarningScope
+		target string
+		policy PolicyID
+		msg    string
+	}{
+		{WarningDryRunDisabled, WarningSetting, "dry-run", "", "Dry run disabled"},
+		{WarningRemoveFiles, WarningPolicy, "policy-stalled_partial-action", StalledPartial, "Remove torrent and files"},
+		{WarningTLSInsecure, WarningSetting, "advanced", "", "TLS certificate verification disabled"},
+	}
+	for _, tc := range cases {
+		w, ok := byCode[tc.code]
+		if !ok {
+			t.Fatalf("missing warning %s: %+v", tc.code, unsafe.Warnings())
+		}
+		if w.Scope != tc.scope || w.Target != tc.target || w.Policy != tc.policy || w.Message != tc.msg {
+			t.Fatalf("warning %s identity drifted: %+v", tc.code, w)
 		}
 	}
-	loopback := decode(t, minimal+"listen: '127.0.0.1:8080'")
-	if strings.Contains(messages(loopback), "web UI") {
-		t.Fatal("loopback UI warned")
+}
+
+func TestStoppedPolicyWarningIsScopedAndListsMatchingTags(t *testing.T) {
+	safe := decode(t, minimal+"policies:\n  stopped_arr_managed:\n    match_tags: ['Sonarr']\n")
+	if _, ok := warningByCode(safe.Warnings(), WarningStoppedPolicyArmed); ok {
+		t.Fatal("stopped policy warned while dry run keeps it passive")
 	}
-	for _, tc := range []struct {
-		addr   string
-		public bool
-	}{{":8080", true}, {"0.0.0.0:8080", true}, {"127.0.0.1:8080", false}, {"[::1]:8080", false}, {"localhost:8080", false}} {
-		if (Config{Listen: tc.addr}).PublicListen() != tc.public {
-			t.Fatal("wrong exposure verdict", tc.addr)
+	armed := decode(t, minimal+"dry_run: false\npolicies:\n  stopped_arr_managed:\n    action: 'delete'\n    match_tags: ['Sonarr', 'Radarr']\n")
+	w, ok := warningByCode(armed.Warnings(), WarningStoppedPolicyArmed)
+	if !ok {
+		t.Fatal("armed stopped policy did not warn")
+	}
+	if w.Scope != WarningPolicy || w.Policy != StoppedArrManaged || w.Target != "policy-stopped_arr_managed" {
+		t.Fatalf("stopped warning identity drifted: %+v", w)
+	}
+	if !strings.Contains(w.Message, "Arr recovery") {
+		t.Fatalf("stopped warning does not distinguish recovery: %q", w.Message)
+	}
+}
+
+func TestNearMissTagsDeduplicateByCodeAndScope(t *testing.T) {
+	c := decode(t, minimal+"exclude_tags: ['QBTW-keep', 'Qbtw-other']")
+	warnings := c.Warnings()
+	if len(warnings) != 2 {
+		t.Fatalf("expected one near miss per tag, got %+v", warnings)
+	}
+	for _, w := range warnings {
+		if w.Code != WarningReservedPrefix || w.Scope != WarningSetting || w.Target != "scope" || len(w.Tags) != 1 {
+			t.Fatalf("near miss identity drifted: %+v", w)
 		}
 	}
+	// A match-tag near miss is still a global diagnostic, so it must not be
+	// scoped to a policy row where nothing would render it.
+	policy := decode(t, minimal+"policies:\n  stopped_arr_managed:\n    match_tags: ['QBTW-keep']\n")
+	w, ok := warningByCode(policy.Warnings(), WarningReservedPrefix)
+	if !ok || w.Scope != WarningSetting || w.Policy != StoppedArrManaged {
+		t.Fatalf("match-tag near miss mis-scoped: %+v", w)
+	}
+}
+
+func warningByCode(warnings []Warning, code WarningCode) (Warning, bool) {
+	for _, w := range warnings {
+		if w.Code == code {
+			return w, true
+		}
+	}
+	return Warning{}, false
 }
 
 func TestRestartRequiredSettings(t *testing.T) {
@@ -449,20 +527,17 @@ func TestExampleConfigurationIsSafeAndComplete(t *testing.T) {
 			t.Fatal("example configures an unsafe policy", id)
 		}
 	}
-	// The example binds every interface, which is the only warning it may
-	// produce; nothing destructive may be enabled.
-	for _, warning := range c.Warnings() {
-		if !strings.Contains(warning.Message, "web UI") {
-			t.Fatal("example is unsafe", warning)
-		}
+	// Nothing destructive may be enabled and, with built-in web auth gone, the
+	// example must be entirely warning-free even while binding every interface.
+	if warnings := c.Warnings(); len(warnings) != 0 {
+		t.Fatal("example is unsafe", warnings)
 	}
 	// Every documented key must actually be present in the example.
 	for _, key := range []string{
 		"qbt_url", "qbt_username", "qbt_password", "qbt_password_file", "poll_interval",
 		"max_observation_gap", "http_timeout", "max_actions_per_poll", "delete_confirmation_timeout",
 		"include_categories", "exclude_categories", "exclude_tags", "state_file", "history_limit",
-		"listen", "ui_refresh_interval", "readiness_max_age", "web_username", "web_password",
-		"web_password_file", "metrics_public", "tls_ca_file", "tls_insecure_skip_verify",
+		"listen", "ui_refresh_interval", "readiness_max_age", "tls_ca_file", "tls_insecure_skip_verify",
 		"log_level", "log_format", "dry_run", "policies", "tag_sync",
 	} {
 		if !bytes.Contains(body, []byte("\n"+key+":")) {

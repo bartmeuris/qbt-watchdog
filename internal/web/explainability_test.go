@@ -28,7 +28,7 @@ func handlerOver(t *testing.T, rows ...watchdog.Row) http.Handler {
 
 func body(t *testing.T, h http.Handler, path string) string {
 	t.Helper()
-	w := request(h, path, "viewer", "SECRET_PASSWORD")
+	w := request(h, path)
 	if w.Code != 200 {
 		t.Fatal("not served", path, w.Code)
 	}
@@ -59,7 +59,7 @@ func TestStatusRowPublishesConfiguredAndEffectiveActionSeparately(t *testing.T) 
 	var decoded struct {
 		Torrents []map[string]any `json:"torrents"`
 	}
-	raw := request(h, "/api/v1/status", "viewer", "SECRET_PASSWORD").Body.Bytes()
+	raw := request(h, "/api/v1/status").Body.Bytes()
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatal(err)
 	}
@@ -140,26 +140,50 @@ func TestInterfaceExplainsEveryClassificationActionAndBlocker(t *testing.T) {
 	if !strings.Contains(page, "stalled_partial · stalledDL") {
 		t.Fatal("machine policy value hidden from the row")
 	}
-	// Both actions appear per row, and the override is named.
-	if !strings.Contains(page, "Delete torrent, keep files") ||
+	// Both actions appear per row, and the override is named. The wording
+	// comes from the shared action labels, so a dry-run downgrade reads
+	// "Remove torrent -> Report only".
+	if !strings.Contains(page, "Remove torrent") ||
+		!strings.Contains(page, "Report only") ||
 		!strings.Contains(page, "dry-run override") {
 		t.Fatal("row does not contrast configured and effective action")
 	}
 }
 
+// TestUnknownSizeRendersAsPlaceholderNotNegativeBytes covers the qBittorrent
+// 5.2.3 -1 sentinel in the UI: an unknown size must read as a placeholder, not
+// as "-1 B" or a misleading "0 B".
+func TestUnknownSizeRendersAsPlaceholderNotNegativeBytes(t *testing.T) {
+	h := handlerOver(t, watchdog.Row{
+		Name: "magnet", ShortHash: "aaaaaaaaaaaa", State: "metaDL",
+		Progress: 0, Downloaded: 0, Size: -1, TotalSize: -1,
+		Decision: watchdog.DecisionNotApplicable,
+	})
+	page := body(t, h, "/partials/torrents")
+	if !strings.Contains(page, "size — / —") {
+		t.Fatalf("unknown size not rendered as a placeholder: %s", page)
+	}
+	if strings.Contains(page, "-1 B") {
+		t.Fatal("unknown size rendered as a negative byte count")
+	}
+}
+
 func TestCountdownReadsAsEligibilityNotAsGuaranteedDeletion(t *testing.T) {
-	h := handlerOver(t)
+	// The detailed conditions live in the per-row tooltip, not in a long block
+	// above the list; the list itself carries only the short explanation.
+	h := handlerOver(t, watchdog.Row{
+		Name: "tracking", ShortHash: "aaaaaaaaaaaa", State: "stalledDL",
+		Policy: config.StalledPartial, ConfiguredAction: config.Delete,
+		EffectiveAction: config.Delete, ThresholdSeconds: 600,
+		FirstSeen: ptrTime(), Elapsed: 60, Remaining: 540,
+		Decision: watchdog.DecisionTracking,
+	})
 	page := body(t, h, "/partials/torrents")
 	if !strings.Contains(page, "Remove in ~") {
-		t.Fatal("next-action wording missing from caveat")
+		t.Fatal("next-action wording missing")
 	}
-	for _, caveat := range []string{
-		"not a countdown to deletion", "action cap", "retry budget",
-		"exclusions", "confirmation read",
-	} {
-		if !strings.Contains(page, caveat) {
-			t.Fatal("eligibility caveat missing", caveat)
-		}
+	if !strings.Contains(page, "Not a countdown to deletion") {
+		t.Fatal("per-row timing tooltip lost its eligibility caveat")
 	}
 	// Overdue stays unmistakably overdue rather than decaying into a timer.
 	overdue := handlerOver(t, watchdog.Row{

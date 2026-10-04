@@ -1,7 +1,9 @@
 package web
 
 import (
+	"fmt"
 	"sort"
+	"strconv"
 
 	"qbt-watchdog/internal/config"
 	"qbt-watchdog/internal/store"
@@ -105,4 +107,30 @@ func historyServices(s watchdog.Snapshot) []string {
 	}
 	sort.Strings(services)
 	return services
+}
+
+// eventIdentity returns the stable DOM identity for an audit event. New events
+// carry a persisted, globally unique ID. Retained events written before that
+// field existed derive a deterministic key from their own fields; byte-identical
+// duplicates are disambiguated with a count so even they keep distinct
+// identities. The count is stable across refreshes because the stored history
+// order is fixed and legacy events are never added to.
+func eventIdentity(e store.Event, seen map[string]int) string {
+	if e.ID != "" {
+		return e.ID
+	}
+	key := legacyEventKey(e)
+	n := seen[key]
+	seen[key] = n + 1
+	if n == 0 {
+		return key
+	}
+	return key + "-" + strconv.Itoa(n)
+}
+
+// legacyEventKey derives a deterministic, id-safe key from the fields a
+// pre-ID event already carried. Times are compared at their stored instant, so
+// the key does not move when the event is re-rendered.
+func legacyEventKey(e store.Event) string {
+	return fmt.Sprintf("legacy-%d-%d-%s-%s-%s", e.Time.UTC().UnixNano(), e.CommandID, e.ShortHash, e.Action, e.Outcome)
 }

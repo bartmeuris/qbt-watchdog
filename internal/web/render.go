@@ -22,13 +22,17 @@ type view struct {
 	// "policies", "activity", "settings"). It is empty for section partials,
 	// which render a single fragment and never consult the page name.
 	Page string
+	// Settings is the typed, source-preserving read model the structured
+	// Settings page renders. It is nil on every other page and when the
+	// structured seam is unavailable.
+	Settings *config.Settings
+	// SettingsError explains why the structured form is unavailable, if it is.
+	SettingsError string
 }
 
 type torrentView struct {
 	Row      watchdog.Row
 	Timeline Timeline
-	// Open reports whether this row is currently expanded on the client.
-	Open bool
 }
 
 type recoveryView struct {
@@ -38,6 +42,7 @@ type recoveryView struct {
 
 type historyView struct {
 	Event    store.Event
+	Identity string
 	Timeline Timeline
 }
 
@@ -63,10 +68,12 @@ func buildView(s watchdog.Snapshot) view {
 
 	// History renders newest first, same as the old app.js re-render.
 	v.History = make([]historyView, 0, len(s.History))
+	identity := map[string]int{}
 	for i := len(s.History) - 1; i >= 0; i-- {
 		e := s.History[i]
 		v.History = append(v.History, historyView{
 			Event:    e,
+			Identity: eventIdentity(e, identity),
 			Timeline: TorrentTimeline(eventRow(e), s.RecoveryJobs, s.History),
 		})
 	}
@@ -112,13 +119,13 @@ func buildPageView(s watchdog.Snapshot, page string) view {
 	return v
 }
 
-// markTorrentsOpen flags the view's torrent rows whose short hash appears in
-// open. It is how a poll's partial re-renders already-expanded rows as open,
-// so the client never collapses and re-expands them.
-func (v view) markTorrentsOpen(open map[string]bool) view {
-	for i := range v.Torrents {
-		v.Torrents[i].Open = open[v.Torrents[i].Row.ShortHash]
-	}
+// buildSettingsPageView wraps buildPageView with the typed settings model. It
+// keeps buildView shared: the settings page still renders the same snapshot
+// facts as every other page, and only adds the structured form data.
+func buildSettingsPageView(s watchdog.Snapshot, model *config.Settings, problem string) view {
+	v := buildPageView(s, "settings")
+	v.Settings = model
+	v.SettingsError = problem
 	return v
 }
 
@@ -174,44 +181,80 @@ func refreshEvery(seconds float64) int {
 
 func newViewFuncs() template.FuncMap {
 	return template.FuncMap{
-		"policyLabel":       policyLabel,
-		"policyOrUnclass":   policyLabelOrUnclassified,
-		"policyDescription": policyDescription,
-		"actionLabel":       actionLabel,
-		"decisionLabel":     decisionLabel,
-		"gateLabel":         gateLabel,
-		"stageLabel":        stageLabel,
-		"modeLabel":         modeLabel,
-		"kindLabel":         kindLabel,
-		"actionEventLabel":  actionEventLabel,
-		"outcomeLabel":      outcomeLabel,
-		"statusLabel":       statusLabel,
-		"timeOrDash":        timeOrDash,
-		"timeHTML":          timeHTML,
-		"timeHTMLShort":     timeHTMLShort,
-		"refreshEvery":      refreshEvery,
-		"dash":              dash,
-		"duration":          duration,
-		"bytes":             bytes,
-		"pct":               pct,
-		"join":              join,
-		"hasDestructive":    hasDestructive,
-		"nextActionLabel":   nextActionLabel,
-		"actionVerb":        actionVerb,
-		"decisionSentence":  decisionSentence,
-		"gateStrip":         gateStrip,
-		"serviceIndicators": serviceIndicators,
-		"torrentStates":     torrentStates,
-		"progressSymbol":    progressSymbol,
-		"policyRows":        policyRows,
-		"warningGroups":     warningGroups,
-		"policyNames":       policyNames,
-		"historyService":    historyService,
-		"historyRowClass":   historyRowClass,
-		"outcomeClass":      outcomeClass,
-		"historyPolicies":   historyPolicies,
-		"historyOutcomes":   historyOutcomes,
-		"historyServices":   historyServices,
+		"policyLabel":          policyLabel,
+		"policyOrUnclass":      policyLabelOrUnclassified,
+		"policyDescription":    policyDescription,
+		"actionLabel":          actionLabel,
+		"dryRunLabel":          dryRunLabel,
+		"eventName":            eventName,
+		"decisionLabel":        decisionLabel,
+		"gateLabel":            gateLabel,
+		"stageLabel":           stageLabel,
+		"modeLabel":            modeLabel,
+		"kindLabel":            kindLabel,
+		"actionEventLabel":     actionEventLabel,
+		"outcomeLabel":         outcomeLabel,
+		"statusLabel":          statusLabel,
+		"timeOrDash":           timeOrDash,
+		"timeHTML":             timeHTML,
+		"timeHTMLShort":        timeHTMLShort,
+		"refreshEvery":         refreshEvery,
+		"dash":                 dash,
+		"duration":             duration,
+		"bytes":                bytes,
+		"pct":                  pct,
+		"join":                 join,
+		"hasDestructive":       hasDestructive,
+		"nextActionLabel":      nextActionLabel,
+		"actionVerb":           actionVerb,
+		"decisionSentence":     decisionSentence,
+		"gateStrip":            gateStrip,
+		"serviceIndicators":    serviceIndicators,
+		"torrentListNotice":    torrentListNotice,
+		"torrentStateOptions":  torrentStateOptions,
+		"progressSymbol":       progressSymbol,
+		"policyRows":           policyRows,
+		"warningGroups":        warningGroups,
+		"diagnosticWarnings":   diagnosticWarnings,
+		"stoppedPolicyWarning": stoppedPolicyWarning,
+		"policyNames":          policyNames,
+		"historyService":       historyService,
+		"historyRowClass":      historyRowClass,
+		"outcomeClass":         outcomeClass,
+		"historyPolicies":      historyPolicies,
+		"historyOutcomes":      historyOutcomes,
+		"historyServices":      historyServices,
+		// Structured settings form helpers.
+		"boolField":                boolField,
+		"intField":                 intField,
+		"durationField":            durationField,
+		"textField":                textField,
+		"listField":                listField,
+		"selectField":              selectField,
+		"withAnchor":               withAnchor,
+		"anchor":                   anchorOf,
+		"sourceLabel":              sourceLabel,
+		"secretSourceLabel":        secretSourceLabel,
+		"secretTypeOptions":        secretTypeOptions,
+		"secretTypeLabel":          secretTypeLabel,
+		"secretFieldView":          secretFieldView,
+		"secretFor":                secretFor,
+		"envVarFor":                envVarFor,
+		"policyIDs":                policyIDs,
+		"arrKinds":                 arrKinds,
+		"actionOptionsView":        actionOptionsView,
+		"arrModeOptionsView":       arrModeOptionsView,
+		"policyArrModeOptionsView": policyArrModeOptionsView,
+		"authModeOptionsView":      authModeOptionsView,
+		"stringOptions":            stringOptions,
+		"logLevelOptions":          logLevelOptions,
+		"logFormatOptions":         logFormatOptions,
+		"logColorOptions":          logColorOptions,
+		"settingString":            settingString,
+		"settingBool":              settingBool,
+		"settingInt":               settingInt,
+		"settingListText":          settingListText,
+		"durationPartsOf":          durationPartsOf,
 	}
 }
 

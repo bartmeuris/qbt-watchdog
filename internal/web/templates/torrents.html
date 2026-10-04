@@ -4,25 +4,24 @@
         <h2 id="torrents-title">Torrents</h2>
         <p>Overdue first · click a row for the evaluation trace and action timeline</p>
     </div>
-    <p class="caveat">&ldquo;Remove in ~12m&rdquo; is the time left before a policy&rsquo;s threshold of continuous
-        observation is met. It is <em>not a countdown to deletion</em>: the per-poll action cap,
-        exclusions, an exhausted retry budget and a final confirmation read can each still prevent
-        the action. Torrents outside every policy are &ldquo;Not applicable&rdquo; and carry no clock at all.</p>
     <div class="list-head torrent-head" aria-hidden="true">
         <span>Torrent</span><span>State</span><span>Policy</span><span>Next action</span>
     </div>
-    <div class="torrent-list" id="torrent-list" data-refresh="/partials/torrent-rows">
+    <div class="torrent-list" id="torrent-list" data-refresh="/partials/torrent-rows" data-live-order="keep">
         {{template "torrent-rows" .}}
     </div>
+    <p class="caveat">Action timing assumes continued matching and successful safety checks. Actions run on a subsequent poll.</p>
 </section>
 {{end}}
 
 {{define "torrent-rows"}}
-{{range .Torrents}}{{template "torrent_row" .}}{{else}}<p class="empty">No torrents in the latest snapshot.</p>{{end}}
+{{$notice := torrentListNotice .Snapshot}}
+{{if $notice}}<p class="notice notice-{{$notice.Kind}}" data-key="torrent-notice">{{if eq $notice.Kind "stale"}}Showing last accepted torrent data from {{timeOrDash $notice.Since}} — {{$notice.Reason}}{{else}}{{$notice.Text}}{{end}}</p>{{end}}
+{{range .Torrents}}{{template "torrent_row" .}}{{else}}{{if not $notice}}<p class="empty" data-key="empty">No torrents in the latest snapshot.</p>{{end}}{{end}}
 {{end}}
 
 {{define "torrent_row"}}
-<details class="torrent{{if and .Row.FirstSeen (le .Row.Remaining 0.0)}} overdue{{end}}" id="torrent-{{.Row.ShortHash}}" data-torrent="{{.Row.ShortHash}}" data-name="{{.Row.Name}}" data-state="{{.Row.State}}"{{if .Open}} open{{end}}>
+<details class="torrent{{if and .Row.FirstSeen (le .Row.Remaining 0.0)}} overdue{{end}}" id="torrent-{{.Row.ShortHash}}" data-key="torrent-{{.Row.ShortHash}}" data-torrent="{{.Row.ShortHash}}" data-name="{{.Row.Name}}" data-state="{{.Row.State}}">
     <summary>
         <span class="t-torrent">
             <span class="t-name" title="{{.Row.Name}}">{{.Row.Name}}</span>

@@ -95,3 +95,69 @@ func TestEscapedEventSizeBound(t *testing.T) {
 	}
 	t.Logf("worst-case fixture: %d bytes; conservative event bound: %d bytes", len(data), maxEventBytes)
 }
+
+func TestEpisodeNameIsOptionalBoundedAndRoundTrips(t *testing.T) {
+	now := time.Now().UTC()
+	hostile := strings.Repeat("界", 100000)
+	s := Empty()
+	s.Tracked[hash] = Episode{FirstSeen: now, LastSeen: now, Attempts: 1, DeleteRequestedAt: &now, Name: hostile}
+	f := write(t, s)
+
+	loaded, err := f.Load(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := loaded.Tracked[hash].Name
+	if len(got) > EventTextLimit || !utf8.ValidString(got) || !strings.HasPrefix(hostile, got) {
+		t.Fatalf("episode name not bounded in place: %q", got)
+	}
+
+	// A record written before the field existed simply loads with no name.
+	nameless := loaded.Tracked[hash]
+	nameless.Name = ""
+	loaded.Tracked[hash] = nameless
+	if err := f.Save(loaded); err != nil {
+		t.Fatal(err)
+	}
+	again, err := f.Load(now)
+	if err != nil {
+		t.Fatalf("nameless episode did not round-trip: %v", err)
+	}
+	if again.Tracked[hash].Name != "" {
+		t.Fatalf("absent name was fabricated: %q", again.Tracked[hash].Name)
+	}
+	if again.Tracked[hash].DeleteRequestedAt == nil {
+		t.Fatal("nameless episode lost its pending deletion")
+	}
+}
+
+func TestEventIdentityAndSequencePersistAndHeal(t *testing.T) {
+	now := time.Now().UTC()
+	s := Empty()
+	s.History = []Event{{Time: now, Action: "warn", Outcome: "success", ID: "7"}}
+	s.EventSeq = 7
+	f := write(t, s)
+	loaded, err := f.Load(now)
+	if err != nil || loaded.History[0].ID != "7" || loaded.EventSeq != 7 {
+		t.Fatalf("event identity did not round-trip: %+v %v", loaded, err)
+	}
+
+	// A file that predates the sequence field still advances above its IDs so
+	// the next event cannot reuse one.
+	s = Empty()
+	s.History = []Event{{Time: now, Action: "warn", Outcome: "success", ID: "42"}}
+	f = write(t, s)
+	loaded, err = f.Load(now)
+	if err != nil || loaded.EventSeq != 42 {
+		t.Fatalf("sequence not healed from retained history: %+v %v", loaded, err)
+	}
+
+	// An over-long identity is bounded rather than trusted.
+	s = Empty()
+	s.History = []Event{{Time: now, Action: "warn", Outcome: "success", ID: strings.Repeat("<", 1000)}}
+	f = write(t, s)
+	loaded, err = f.Load(now)
+	if err != nil || len(loaded.History[0].ID) > EventHashLimit {
+		t.Fatalf("event identity not bounded: %+v %v", loaded, err)
+	}
+}

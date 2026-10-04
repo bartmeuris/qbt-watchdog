@@ -721,3 +721,25 @@ func TestTagSyncPrefixMismatchAndRemediation(t *testing.T) {
 		}
 	})
 }
+
+// TestUnknownSizeSentinelIsNotCompletedNoDataAndTriggersNoAction guards the
+// qBittorrent 5.2.3 -1 sentinel end to end: a torrent whose size fields are
+// unknown must not be mistaken for a completed torrent with no payload, and
+// must never cause a deletion or a tag write.
+func TestUnknownSizeSentinelIsNotCompletedNoDataAndTriggersNoAction(t *testing.T) {
+	s, c, clock, _ := fixture(t)
+	s.c.DryRun = false
+	c.torrents = []qbt.Torrent{{
+		Hash: hashA, Name: "magnet", State: "uploading",
+		Progress: 0, Downloaded: 0, Size: -1, TotalSize: -1, Completed: -1, AmountLeft: -1,
+	}}
+	if got := s.matchingPolicy(c.torrents[0]); got != "" {
+		t.Fatalf("unknown total_size classified as %q", got)
+	}
+	poll(t, s)
+	clock.Advance(20 * time.Second)
+	poll(t, s)
+	if len(c.deletes) != 0 || len(c.adds) != 0 || len(c.removes) != 0 {
+		t.Fatalf("unknown total_size triggered a mutation: deletes=%v adds=%v removes=%v", c.deletes, c.adds, c.removes)
+	}
+}

@@ -20,10 +20,10 @@ func newSaverFixture(t *testing.T, raw, stamp string) (config.Config, *watchdog.
 	saved := struct{ raw, stamp string }{}
 	saver := ConfigSaverFunc{
 		ReadFunc: func() ([]byte, string, error) { return []byte(raw), stamp, nil },
-		SaveFunc: func(b []byte, st string) (string, config.Status, error) {
+		SaveFunc: func(b []byte, st string) (config.SaveResult, error) {
 			saved.raw = string(b)
 			saved.stamp = st
-			return "new-stamp", config.Status{Generation: 2}, nil
+			return config.SaveResult{Stamp: "new-stamp", Saved: true, Applied: true, Status: config.Status{Generation: 2}}, nil
 		},
 	}
 	return c, s, m, saver, &saved
@@ -36,7 +36,6 @@ func TestSettingsEditorFragmentEscapesRawYAML(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/partials/settings-editor", nil)
-	req.SetBasicAuth("viewer", "SECRET_PASSWORD")
 	h.ServeHTTP(rr, req)
 
 	if rr.Code != 200 {
@@ -64,7 +63,6 @@ func TestSettingsEditorDisabledNote(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/partials/settings-editor", nil)
-	req.SetBasicAuth("viewer", "SECRET_PASSWORD")
 	h.ServeHTTP(rr, req)
 
 	if rr.Code != 200 {
@@ -89,7 +87,6 @@ func TestPostConfigAcceptsFormEncodedInput(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("HX-Request", "true")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.SetBasicAuth("viewer", "SECRET_PASSWORD")
 	h.ServeHTTP(rr, req)
 
 	if rr.Code != 200 {
@@ -98,7 +95,7 @@ func TestPostConfigAcceptsFormEncodedInput(t *testing.T) {
 	if saved.raw != "qbt_url: 'http://edited'\n" || saved.stamp != "stamp-one" {
 		t.Fatalf("saver received (%q, %q)", saved.raw, saved.stamp)
 	}
-	if !strings.Contains(rr.Body.String(), `"status":"applied"`) {
+	if !strings.Contains(rr.Body.String(), `"applied":true`) {
 		t.Fatal("expected applied response")
 	}
 }
@@ -115,10 +112,30 @@ func TestPostConfigRejectsWithoutCSRF(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/config", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	// Deliberately omit HX-Request / Sec-Fetch-Site headers.
-	req.SetBasicAuth("viewer", "SECRET_PASSWORD")
 	h.ServeHTTP(rr, req)
 
 	if rr.Code != 403 {
 		t.Fatalf("expected 403 for missing CSRF, got %d", rr.Code)
+	}
+}
+
+func TestPostConfigRejectsCrossOrigin(t *testing.T) {
+	c, s, m, saver, _ := newSaverFixture(t, "qbt_url: 'http://localhost'\n", "stamp-one")
+	h := DynamicHandlerWithConfig(func() config.Config { return c }, func() watchdog.Snapshot { return *s }, m, saver)
+
+	form := url.Values{}
+	form.Set("raw", "qbt_url: 'http://edited'\n")
+	form.Set("stamp", "stamp-one")
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/config", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("HX-Request", "true")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	req.Header.Set("Origin", "https://evil.example")
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != 403 {
+		t.Fatalf("expected 403 for cross-origin save, got %d", rr.Code)
 	}
 }

@@ -5,10 +5,11 @@
         <p>Newest first · limited to the last {{.Snapshot.Limits.HistoryLimit}} events</p>
     </div>
     {{template "history_toolbar" .}}
+    <p id="history-new" class="history-new" role="status" aria-live="polite"></p>
     <div class="list-head history-head" aria-hidden="true">
         <span>Time</span><span>Torrent</span><span>Policy</span><span>Action</span><span>Outcome</span><span>Service</span>
     </div>
-    <div class="history-list" id="history-list" data-refresh="/partials/history-rows">
+    <div class="history-list" id="history-list" data-refresh="/partials/history-rows" data-live-order="keep">
         {{template "history-rows" .}}
     </div>
 </section>
@@ -37,15 +38,15 @@
 {{end}}
 
 {{define "history-rows"}}
-{{range .History}}{{template "history_row" .}}{{else}}<p class="empty">No actions yet.</p>{{end}}
+{{range .History}}{{template "history_row" .}}{{else}}<p class="empty" data-key="empty">No actions yet.</p>{{end}}
 {{end}}
 
 {{define "history_row"}}
-<details class="history{{historyRowClass .Event}}" id="history-{{if .Event.CommandID}}{{.Event.CommandID}}{{else}}{{.Event.Time.UnixNano}}{{end}}" data-history data-name="{{.Event.Name}}" data-policy="{{.Event.Policy}}" data-outcome="{{.Event.Outcome}}" data-service="{{historyService .Event}}">
+<details class="history{{historyRowClass .Event}}" id="history-{{.Identity}}" data-key="history-{{.Identity}}" data-history data-name="{{eventName .Event}}" data-policy="{{.Event.Policy}}" data-outcome="{{.Event.Outcome}}" data-service="{{historyService .Event}}">
     <summary>
         <span class="t-time">{{timeHTMLShort .Event.Time}}</span>
         <span class="t-torrent">
-            <span class="t-name">{{if .Event.Name}}{{.Event.Name}}{{else}}—{{end}}</span>
+            <span class="t-name">{{eventName .Event}}</span>
             <code class="t-hash">{{.Event.ShortHash}}</code>
         </span>
         <span class="t-policy">{{if .Event.Policy}}{{policyOrUnclass .Event.Policy}}{{else}}—{{end}}</span>
@@ -62,7 +63,7 @@
             <dt>Outcome</dt><dd>{{outcomeLabel .Event.Outcome}} <code>{{.Event.Outcome}}</code></dd>
             <dt>Policy</dt><dd>{{if .Event.Policy}}{{policyOrUnclass .Event.Policy}} <code>{{.Event.Policy}}</code>{{else}}—{{end}}</dd>
             <dt>Effective action</dt><dd>{{if .Event.EffectiveAction}}{{actionLabel .Event.EffectiveAction}}{{else}}Unrecorded{{end}}</dd>
-            <dt>Torrent</dt><dd>{{if .Event.Name}}{{.Event.Name}} · {{end}}{{.Event.ShortHash}}</dd>
+            <dt>Torrent</dt><dd>{{eventName .Event}}{{if .Event.Name}} · {{.Event.ShortHash}}{{end}}</dd>
             <dt>Service</dt><dd>{{historyService .Event}}</dd>
             <dt>Command ID</dt><dd>{{if .Event.CommandID}}{{.Event.CommandID}}{{else}}—{{end}}</dd>
             {{if .Event.Error}}<dt>Detail</dt><dd>{{.Event.Error}}</dd>{{end}}

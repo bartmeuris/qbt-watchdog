@@ -123,16 +123,20 @@ func TestEditorValidationRejectsInvalidValue(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "log_format") {
 		t.Fatal("expected log_format validation error, got", err)
 	}
-	// The file is still well-formed YAML carrying the rejected value.
+	// Validation happens before the write, so the rejected value never lands
+	// on disk and the previous document is untouched.
 	out, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "bogus") {
-		t.Fatal("rejected value not written", string(out))
+	if strings.Contains(string(out), "bogus") {
+		t.Fatal("rejected value was written", string(out))
 	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected Load to reject the invalid file")
+	if string(out) != minimal {
+		t.Fatal("document changed on a rejected save", string(out))
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatal("valid document was damaged by a rejected save", err)
 	}
 }
 
@@ -203,7 +207,7 @@ func TestEditorSaveRaw(t *testing.T) {
 		t.Fatal("expected ErrConflict, got", err)
 	}
 
-	// Invalid YAML is written then rejected by validation.
+	// Invalid YAML is rejected before the write, so the valid document stays.
 	_, freshStamp, err := e.Read()
 	if err != nil {
 		t.Fatal(err)
@@ -215,11 +219,14 @@ func TestEditorSaveRaw(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(written), "[unclosed") {
-		t.Fatal("invalid yaml not written", string(written))
+	if strings.Contains(string(written), "[unclosed") {
+		t.Fatal("invalid yaml was written", string(written))
 	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected Load to reject invalid YAML")
+	if string(written) != edited {
+		t.Fatal("valid document changed on a rejected raw save", string(written))
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatal("valid document was damaged by a rejected raw save", err)
 	}
 }
 

@@ -4,12 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -210,41 +208,7 @@ func (c *Client) list(ctx context.Context, query url.Values) ([]Torrent, error) 
 	if err != nil {
 		return nil, err
 	}
-	var decoded []struct {
-		Torrent
-		Progress   *float64 `json:"progress"`
-		Downloaded *int64   `json:"downloaded"`
-		Size       *int64   `json:"size"`
-		TotalSize  *int64   `json:"total_size"`
-		AmountLeft *int64   `json:"amount_left"`
-		NumSeeds   *int     `json:"num_seeds"`
-	}
-	if err = json.Unmarshal(data, &decoded); err != nil || decoded == nil {
-		return nil, errors.New("invalid torrent list response")
-	}
-	torrents := make([]Torrent, 0, len(decoded))
-	for _, entry := range decoded {
-		if entry.Progress == nil || entry.Downloaded == nil || entry.Size == nil || entry.TotalSize == nil || entry.AmountLeft == nil || entry.NumSeeds == nil || *entry.NumSeeds < 0 {
-			return nil, errors.New("torrent response lacks required safety fields")
-		}
-		entry.Torrent.Progress = *entry.Progress
-		entry.Torrent.Downloaded = *entry.Downloaded
-		entry.Torrent.Size = *entry.Size
-		entry.Torrent.TotalSize = *entry.TotalSize
-		entry.Torrent.AmountLeft = *entry.AmountLeft
-		entry.Torrent.NumSeeds = *entry.NumSeeds
-		torrents = append(torrents, entry.Torrent)
-	}
-	seen := map[string]bool{}
-	for i := range torrents {
-		t := &torrents[i]
-		t.Hash = strings.ToLower(t.Hash)
-		if !ValidHash(t.Hash) || seen[t.Hash] || t.State == "" || math.IsNaN(t.Progress) || math.IsInf(t.Progress, 0) || t.Progress < 0 || t.Progress > 1 || t.Downloaded < 0 || t.Size < 0 || t.TotalSize < 0 || t.Completed < 0 || t.AmountLeft < 0 || t.Size > t.TotalSize || t.AddedOn > 253402300799 {
-			return nil, errors.New("invalid torrent data")
-		}
-		seen[t.Hash] = true
-	}
-	return torrents, nil
+	return decodeTorrents(data, "torrents/info")
 }
 func (c *Client) List(ctx context.Context) ([]Torrent, error) { return c.list(ctx, nil) }
 func (c *Client) Get(ctx context.Context, hash string) (*Torrent, error) {
@@ -259,7 +223,7 @@ func (c *Client) Get(ctx context.Context, hash string) (*Torrent, error) {
 		return nil, nil
 	}
 	if len(ts) != 1 || ts[0].Hash != hash {
-		return nil, errors.New("targeted torrent response mismatch")
+		return nil, &ResponseError{Code: CodeTargetMismatch, Operation: "torrents/info", Index: -1}
 	}
 	return &ts[0], nil
 }

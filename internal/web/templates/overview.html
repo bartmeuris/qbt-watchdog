@@ -9,7 +9,7 @@
 {{end}}
 
 {{define "overview-counters"}}
-<div class="counter-group">
+<div class="counter-group" data-key="snapshot">
     <span class="counter-group-label">Snapshot</span>
     <div class="counter-items">
         <div class="stat"><strong>{{.Snapshot.Summary.Total}}</strong><span>Total</span></div>
@@ -20,7 +20,7 @@
         <div class="stat"><strong>{{.Snapshot.Summary.DeleteRequested}}</strong><span>Delete requested</span></div>
     </div>
 </div>
-<div class="counter-group">
+<div class="counter-group" data-key="since-startup">
     <span class="counter-group-label">Since startup</span>
     <div class="counter-items">
         <div class="stat"><strong>{{.Snapshot.SinceStartup.Deletions}}</strong><span>Confirmed</span></div>
@@ -28,7 +28,7 @@
         <div class="stat"><strong>{{.Snapshot.SinceStartup.DeleteRequests}}</strong><span>Requests</span></div>
     </div>
 </div>
-<div class="counter-group">
+<div class="counter-group" data-key="lifetime">
     <span class="counter-group-label">Lifetime</span>
     <div class="counter-items">
         <div class="stat"><strong>{{.Snapshot.Lifetime.Deletions}}</strong><span>Confirmed</span></div>
@@ -44,8 +44,8 @@
     <input type="search" id="torrent-search" placeholder="Filter torrents by name…" autocomplete="off">
     <label for="torrent-state">State</label>
     <select id="torrent-state">
-        <option value="">All states</option>
-        {{range torrentStates .Snapshot}}<option value="{{.}}">{{.}}</option>{{end}}
+        <option value="" data-state-label="All states">All states ({{len .Torrents}})</option>
+        {{range torrentStateOptions .Snapshot}}<option value="{{.Value}}" data-state-label="{{.Label}}">{{.Label}} ({{.Count}})</option>{{end}}
     </select>
 </div>
 {{end}}
@@ -56,7 +56,7 @@
         <h2 id="recent-title">Recent actions</h2>
         <a href="/activity">View all activity</a>
     </div>
-    <div class="history-list" id="recent-list" data-refresh="/partials/recent-rows">
+    <div class="history-list" id="recent-list" data-refresh="/partials/recent-rows" data-live-order="keep">
         {{template "recent-rows" .}}
     </div>
 </section>
@@ -70,6 +70,6 @@
 {{end}}
 {{end}}
 {{else}}
-<p class="empty">No actions yet.</p>
+<p class="empty" data-key="empty">No actions yet.</p>
 {{end}}
 {{end}}

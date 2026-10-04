@@ -47,12 +47,14 @@ func PolicyDescriptions() map[string]string {
 }
 
 // ActionLabels maps every closed action to its headline. It is total over
-// config.Actions().
+// config.Actions(). The wording is the single standard used wherever an action
+// is named for an operator: a dry run reports, a delete removes the torrent
+// alone, and a delete_file removes the torrent together with its payload.
 func ActionLabels() map[string]string {
 	return map[string]string{
-		string(config.Warn):       "Warn only",
-		string(config.Delete):     "Delete torrent, keep files",
-		string(config.DeleteFile): "Delete torrent and files",
+		string(config.Warn):       "Report only",
+		string(config.Delete):     "Remove torrent",
+		string(config.DeleteFile): "Remove torrent and files",
 	}
 }
 
@@ -149,6 +151,34 @@ func actionLabel(a config.Action) string {
 		return l
 	}
 	return string(a)
+}
+
+// dryRunLabel is the single standard wording for the global dry-run mode. Dry
+// run off is stated explicitly ("Dry run disabled") rather than implied by an
+// absent badge, so settings and the header cannot drift apart.
+func dryRunLabel(enabled bool) string {
+	if enabled {
+		return "Dry run enabled"
+	}
+	return "Dry run disabled"
+}
+
+// nameUnavailable prefixes the fallback shown when an audit event carries no
+// torrent name. Older persisted records and events for a torrent that was
+// already gone have no recoverable name; the hash still identifies the row, so
+// the UI says so rather than printing a blank.
+const nameUnavailable = "Name unavailable"
+
+// eventName renders an audit event's torrent name, falling back to a
+// hash-qualified label when no name was recorded.
+func eventName(e store.Event) string {
+	if e.Name != "" {
+		return e.Name
+	}
+	if e.ShortHash != "" {
+		return nameUnavailable + " · " + e.ShortHash
+	}
+	return nameUnavailable
 }
 
 func decisionLabel(d string) string {
@@ -259,10 +289,13 @@ func duration(seconds float64) string {
 	}
 }
 
-// bytes renders a byte count with binary units, matching the old app.js.
+// bytes renders a byte count with binary units, matching the old app.js. A
+// negative value is qBittorrent's "unknown" sentinel (for example a magnet
+// still fetching metadata), so it renders as a placeholder rather than a
+// misleading zero or a raw -1.
 func bytes(n int64) string {
 	if n < 0 {
-		n = 0
+		return "—"
 	}
 	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
 	var value float64 = float64(n)

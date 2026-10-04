@@ -15,7 +15,9 @@
     <div class="header-right">
         {{template "services" .}}
         <span id="mode" class="mode{{if .Snapshot.DryRun}} mode-dry{{else if hasDestructive .Snapshot}} mode-active{{end}}">
-            {{if .Snapshot.DryRun}}Dry run{{else if hasDestructive .Snapshot}}Live actions{{else}}Warn only{{end}}
+            {{if .Snapshot.DryRun}}Dry run enabled
+            {{else if hasDestructive .Snapshot}}<a href="/settings#dry-run" title="Dry run is disabled; destructive actions may execute.">Dry run disabled</a>
+            {{else}}Report only{{end}}
         </span>
     </div>
 </header>
@@ -32,7 +34,7 @@
 {{end}}
 
 {{define "service_indicator"}}
-<details class="service service-{{.Status}}" id="svc-{{.ID}}">
+<details class="service service-{{.Status}}" id="svc-{{.ID}}" data-key="svc-{{.ID}}">
     <summary>
         <span class="dot" aria-hidden="true"></span>
         <span class="svc-name">{{.Name}}</span>
@@ -41,8 +43,15 @@
     <div class="popover">
         <dl>
             <dt>Status</dt><dd>{{.StatusLabel}}</dd>
-            <dt>Last contact</dt><dd>{{timeOrDash .LastContact}}</dd>
+            {{if .Rejected}}
+            <dt>Diagnostic</dt><dd>{{.Error}}</dd>
+            <dt>Meaning</dt><dd>{{.Explanation}}</dd>
+            {{if .QBTVersion}}<dt>qBittorrent version</dt><dd>{{.QBTVersion}}</dd>{{end}}
+            {{if .WebAPIVersion}}<dt>Web API version</dt><dd>{{.WebAPIVersion}}</dd>{{end}}
+            {{else}}
             <dt>Latest error</dt><dd>{{dash .Error}}</dd>
+            {{end}}
+            <dt>{{.LastContactLabel}}</dt><dd>{{timeOrDash .LastContact}}</dd>
             <dt>Latest action</dt><dd>{{dash .LastAction}}</dd>
         </dl>
     </div>
