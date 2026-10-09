@@ -43,7 +43,7 @@ func serviceWithLog(t *testing.T, log *slog.Logger) (*Service, *fakeClient, *fak
 	clock := &fakeClock{time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)}
 	client := &fakeClient{torrents: []qbt.Torrent{torrent(hashA)}}
 	disk := &memoryStore{}
-	build := observability.NewBuild("test", "test", "test")
+	build := testBuild()
 	service := New(c, client, disk, clock, log, observability.New(build), build)
 	return service, client, clock
 }

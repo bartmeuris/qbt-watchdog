@@ -2,19 +2,7 @@ package observability
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
-	"runtime"
 )
-
-type Build struct {
-	Version   string `json:"version"`
-	Revision  string `json:"revision"`
-	Date      string `json:"build_date"`
-	GoVersion string `json:"go_version"`
-}
-
-func NewBuild(version, revision, date string) Build {
-	return Build{version, revision, date, runtime.Version()}
-}
 
 type Metrics struct {
 	IntegrationHealthy, RecoveryPending                            *prometheus.GaugeVec

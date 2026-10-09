@@ -32,7 +32,7 @@ func TestAPIKeyAbsentFromPublicSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.CloseIdleConnections()
-	build := observability.NewBuild("test", "test", "test")
+	build := testBuild()
 	metrics := observability.New(build)
 	s := watchdog.New(c, client, store.File{Path: filepath.Join(t.TempDir(), "state.json"), HistoryLimit: 100}, watchdog.RealClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics, build)
 	if err := s.Poll(context.Background()); err == nil {

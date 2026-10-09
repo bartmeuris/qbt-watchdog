@@ -27,13 +27,9 @@ import (
 	"qbt-watchdog/internal/web"
 )
 
-var version = "dev"
-var revision = "unknown"
-var buildDate = "unknown"
-
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 func run(args []string, out, stderr io.Writer) int {
-	build := observability.NewBuild(version, revision, buildDate)
+	build := observability.NewBuild()
 	if len(args) > 0 && args[0] == "version" {
 		_ = json.NewEncoder(out).Encode(build)
 		return 0
@@ -52,7 +48,7 @@ func run(args []string, out, stderr io.Writer) int {
 	logging := newLogSwitch(stderr)
 	logging.Apply(c.LogLevel, c.LogFormat, c.LogColor)
 	log := slog.New(logging)
-	log.Info("qbt-watchdog starting", "event", "startup", "version", version, "dry_run", c.DryRun, "poll_interval", c.PollInterval, "max_observation_gap", c.MaxObservationGap, "max_actions_per_poll", c.MaxDeletions, "max_attempts_per_episode", store.MaxAttempts)
+	log.Info("qbt-watchdog starting", "event", "startup", "version", build.Version, "dry_run", c.DryRun, "poll_interval", c.PollInterval, "max_observation_gap", c.MaxObservationGap, "max_actions_per_poll", c.MaxDeletions, "max_attempts_per_episode", store.MaxAttempts)
 	announce(log, c)
 	client, err := qbt.New(c, log)
 	if err != nil {

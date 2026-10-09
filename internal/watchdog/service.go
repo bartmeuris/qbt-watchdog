@@ -975,6 +975,12 @@ func (s *Service) Poll(ctx context.Context) error {
 			s.fail(PollStageCancelled, err)
 			return err
 		}
+		// One best-effort blocklist attempt once the torrent is confirmed
+		// present and eligible, immediately before the qBittorrent delete. The
+		// media manager's own import loop may drop its queue row at any moment,
+		// so waiting until after confirmed removal risks losing the blocklist to
+		// a 404.
+		s.blocklistBeforeDelete(ctx, *confirmed)
 		s.state.Tracked[t.Hash] = reserved
 		if err = s.client.Delete(ctx, t.Hash, effective == config.DeleteFile); err != nil {
 			s.releaseRecovery(t.Hash)

@@ -81,6 +81,11 @@ func recoveryFixture(t *testing.T, kind config.ArrKind, mode config.ArrMode) (*S
 	f.onMutation = func(stage store.RecoveryStage) {
 		t.Helper()
 		for _, j := range disk.state.RecoveryJobs {
+			// The pre-delete blocklist is durable once BlocklistAt is set,
+			// even though the torrent has not been confirmed deleted yet.
+			if stage == store.BlocklistIntent && !j.BlocklistAt.IsZero() {
+				return
+			}
 			if j.Stage == stage && !j.DeletedAt.IsZero() {
 				return
 			}
@@ -111,8 +116,8 @@ func TestRecoveryAcceptedThenConfirmedPackAndMovie(t *testing.T) {
 			for range 3 {
 				cycle(s, kind)
 			}
-			if f.removes != 0 || len(f.searches) != 0 {
-				t.Fatal("mutated before disappearance")
+			if f.removes != 1 || len(f.searches) != 0 {
+				t.Fatal("blocklist must precede disappearance and search must wait")
 			}
 			q.torrents = nil
 			poll(t, s)
@@ -152,6 +157,10 @@ func TestRecoveryNoMutationGates(t *testing.T) {
 				q.listError = errors.New("failure")
 			}
 			if gate == "final_get_abort" {
+				// A fresh queue snapshot would let a pre-recheck blocklist
+				// attempt reach the media manager, so the no-mutation
+				// assertion below actually exercises the blocklist path.
+				cycle(s, config.Sonarr)
 				q.fresh = func(string) *qbt.Torrent {
 					if len(q.gets) == 2 {
 						return nil
@@ -222,14 +231,22 @@ func TestRecoverySafetyAndUncertainNeverReplayed(t *testing.T) {
 	for _, scenario := range []string{"vanished", "404", "incomplete", "replacement", "imported", "file_unknown", "ambiguous_delete", "ambiguous_search"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, q, clock, _, f := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+			// A fresh queue snapshot lets the pre-delete blocklist attempt
+			// actually reach the media manager, so the blocklist outcomes are
+			// exercised rather than skipped.
+			cycle(s, config.Sonarr)
+			switch scenario {
+			case "404":
+				f.removeErr = &arr.Error{Outcome: arr.NotFound}
+			case "ambiguous_delete":
+				f.removeErr = errors.New("EOF")
+			}
 			acceptRecovery(t, s, clock)
 			q.torrents = nil
 			poll(t, s)
 			switch scenario {
 			case "vanished":
 				f.items = nil
-			case "404":
-				f.removeErr = &arr.Error{Outcome: arr.NotFound}
 			case "incomplete":
 				f.items[0].MediaID = nil
 			case "replacement":
@@ -239,8 +256,6 @@ func TestRecoverySafetyAndUncertainNeverReplayed(t *testing.T) {
 				f.imported = true
 			case "file_unknown":
 				f.fileErr = &arr.Error{Outcome: arr.Rejected}
-			case "ambiguous_delete":
-				f.removeErr = errors.New("EOF")
 			case "ambiguous_search":
 				f.searchErr = errors.New("EOF")
 			}
@@ -248,8 +263,11 @@ func TestRecoverySafetyAndUncertainNeverReplayed(t *testing.T) {
 				cycle(s, config.Sonarr)
 				clock.Advance(time.Minute)
 			}
+			// A failed or ambiguous blocklist no longer suppresses the
+			// replacement search: it runs once removal is confirmed.
 			wantSearch := 0
-			if scenario == "ambiguous_search" {
+			switch scenario {
+			case "vanished", "404", "ambiguous_delete", "ambiguous_search":
 				wantSearch = 1
 			}
 			if len(f.searches) != wantSearch || f.removes > 1 {
@@ -317,7 +335,7 @@ func TestRecoveryRestartIntentBoundaries(t *testing.T) {
 				s.state.RecoveryJobs[id] = j
 			}
 			s.persist()
-			build := observability.NewBuild("test", "test", "test")
+			build := testBuild()
 			restarted := New(s.Config(), q, disk, clock, s.log, observability.New(build), build)
 			restarted.integrations[config.Sonarr].client.CloseIdleConnections()
 			restarted.integrations[config.Sonarr].client = f
@@ -393,7 +411,7 @@ func TestRecoveryVanishedQueueStillSearchesWhenMediaKnown(t *testing.T) {
 	for range 4 {
 		cycle(s, config.Sonarr)
 	}
-	if f.removes != 0 || len(f.searches) != 1 {
+	if f.removes != 1 || len(f.searches) != 1 {
 		t.Fatalf("vanished queue item with known media must still search: removes=%d searches=%v", f.removes, f.searches)
 	}
 }
@@ -409,7 +427,7 @@ func TestRecoveryVanishedQueueDoesNotSearchWhenImported(t *testing.T) {
 	for range 4 {
 		cycle(s, config.Sonarr)
 	}
-	if f.removes != 0 || len(f.searches) != 0 {
+	if f.removes != 1 || len(f.searches) != 0 {
 		t.Fatalf("imported media must not be searched: removes=%d searches=%v", f.removes, f.searches)
 	}
 }
@@ -435,7 +453,7 @@ func TestRecoveryStatusCarriesCorrelation(t *testing.T) {
 	acceptRecovery(t, s, clock)
 	q.torrents = nil
 	poll(t, s)
-	for range 3 {
+	for range 2 {
 		cycle(s, config.Sonarr)
 	}
 	jobs := s.Snapshot().RecoveryJobs
@@ -445,5 +463,179 @@ func TestRecoveryStatusCarriesCorrelation(t *testing.T) {
 	job := jobs[0]
 	if job.ID == "" || job.ShortHash != qbt.ShortHash(hashA) || job.Policy != config.Metadata || job.CommandID != 44 {
 		t.Fatalf("recovery status lost correlation: %+v", job)
+	}
+}
+
+// TestRecoveryBlocklistPrecedesQBTDelete pins the new ordering: the one
+// best-effort blocklist attempt happens while the torrent is still present,
+// before the qBittorrent delete request.
+func TestRecoveryBlocklistPrecedesQBTDelete(t *testing.T) {
+	s, q, clock, _, f := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+	cycle(s, config.Sonarr)
+	var order []string
+	f.onMutation = func(stage store.RecoveryStage) {
+		if stage == store.BlocklistIntent {
+			order = append(order, "blocklist")
+		}
+	}
+	q.onDelete = func(string) { order = append(order, "delete") }
+	acceptRecovery(t, s, clock)
+	if !slices.Equal(order, []string{"blocklist", "delete"}) {
+		t.Fatalf("blocklist must precede qbt delete: %v", order)
+	}
+}
+
+// TestRecoveryBlocklistSkippedWhenFinalRecheckIneligible proves the blocklist
+// attempt runs only after the final eligibility recheck: when the recheck
+// returns a torrent that no longer matches its policy, the release is not
+// blocklisted and no qBittorrent delete is issued.
+func TestRecoveryBlocklistSkippedWhenFinalRecheckIneligible(t *testing.T) {
+	s, q, clock, _, f := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+	poll(t, s)
+	clock.Advance(20 * time.Second)
+	// A fresh queue snapshot would let a pre-recheck blocklist attempt reach
+	// the media manager, so the assertions below are meaningful.
+	cycle(s, config.Sonarr)
+	q.fresh = func(string) *qbt.Torrent {
+		v := torrent(hashA)
+		if len(q.gets) == 2 {
+			// The final recheck sees nonzero progress, so the metadata policy
+			// no longer matches and the torrent is ineligible.
+			v.Progress = 0.5
+		}
+		return &v
+	}
+	poll(t, s)
+	if f.removes != 0 {
+		t.Fatalf("blocklisted an ineligible release: removes=%d", f.removes)
+	}
+	if len(q.deletes) != 0 {
+		t.Fatalf("deleted an ineligible release: deletes=%v", q.deletes)
+	}
+}
+
+// TestRecoveryBlocklistUnavailableStillCleansUp proves an unavailable media
+// manager cannot block the qBittorrent cleanup; the failed attempt is recorded
+// and never retried.
+func TestRecoveryBlocklistUnavailableStillCleansUp(t *testing.T) {
+	s, q, clock, disk, f := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+	cycle(s, config.Sonarr)
+	s.integrations[config.Sonarr].client = nil
+	acceptRecovery(t, s, clock)
+	if len(q.deletes) != 1 {
+		t.Fatal("unavailable arr blocked qbt cleanup")
+	}
+	if f.removes != 0 {
+		t.Fatal("blocklist attempted without a client")
+	}
+	for _, j := range disk.state.RecoveryJobs {
+		if j.BlocklistCode != string(arr.Unreachable) {
+			t.Fatalf("unavailable blocklist not recorded: %+v", j)
+		}
+	}
+}
+
+// TestRecoveryBlocklistVanishedStillCleansUp proves a media manager that has
+// already dropped its queue row does not block cleanup; the attempt is recorded
+// as not found.
+func TestRecoveryBlocklistVanishedStillCleansUp(t *testing.T) {
+	s, q, clock, disk, f := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+	f.items = nil
+	cycle(s, config.Sonarr)
+	acceptRecovery(t, s, clock)
+	if len(q.deletes) != 1 {
+		t.Fatal("vanished arr row blocked qbt cleanup")
+	}
+	if f.removes != 0 {
+		t.Fatal("blocklist attempted without a queue identity")
+	}
+	for _, j := range disk.state.RecoveryJobs {
+		if j.BlocklistCode != string(arr.NotFound) {
+			t.Fatalf("vanished blocklist not recorded: %+v", j)
+		}
+	}
+}
+
+// TestRecoveryBlocklistAttemptedOnce proves the durable BlocklistAt marker
+// makes the best-effort attempt idempotent across a delete retry and a restart.
+func TestRecoveryBlocklistAttemptedOnce(t *testing.T) {
+	t.Run("delete_retry", func(t *testing.T) {
+		s, _, _, _, f := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+		cycle(s, config.Sonarr)
+		e := store.Episode{Policy: config.Metadata, FirstSeen: s.clock.Now()}
+		s.mu.Lock()
+		s.prepareRecovery(torrent(hashA), e)
+		s.blocklistBeforeDelete(context.Background(), torrent(hashA))
+		s.blocklistBeforeDelete(context.Background(), torrent(hashA))
+		s.mu.Unlock()
+		if f.removes != 1 {
+			t.Fatalf("blocklist replayed on retry: %d", f.removes)
+		}
+	})
+	t.Run("restart", func(t *testing.T) {
+		s, q, clock, disk, f := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+		cycle(s, config.Sonarr)
+		e := store.Episode{Policy: config.Metadata, FirstSeen: clock.Now()}
+		s.mu.Lock()
+		s.prepareRecovery(torrent(hashA), e)
+		s.blocklistBeforeDelete(context.Background(), torrent(hashA))
+		s.persist()
+		s.mu.Unlock()
+		if f.removes != 1 {
+			t.Fatalf("expected one blocklist, got %d", f.removes)
+		}
+		build := testBuild()
+		restarted := New(s.Config(), q, disk, clock, s.log, observability.New(build), build)
+		restarted.integrations[config.Sonarr].client.CloseIdleConnections()
+		restarted.integrations[config.Sonarr].client = f
+		for _, j := range restarted.state.RecoveryJobs {
+			if j.Stage != store.Uncertain {
+				t.Fatalf("prepared job not fenced on restart: %+v", j)
+			}
+		}
+		cycle(restarted, config.Sonarr)
+		if f.removes != 1 {
+			t.Fatalf("blocklist replayed after restart: %d", f.removes)
+		}
+	})
+}
+
+// TestRecoveryBlocklistNotRepeatedOnDeleteRetry proves that when an accepted
+// deletion does not disappear within the confirmation timeout, the retried
+// delete does not blocklist the release a second time.
+func TestRecoveryBlocklistNotRepeatedOnDeleteRetry(t *testing.T) {
+	s, q, clock, _, f := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+	cycle(s, config.Sonarr)
+	acceptRecovery(t, s, clock)
+	if f.removes != 1 || len(q.deletes) != 1 {
+		t.Fatalf("expected one blocklist and one delete, got removes=%d deletes=%d", f.removes, len(q.deletes))
+	}
+	clock.Advance(s.c.DeleteConfirmationTimeout + time.Second)
+	poll(t, s)
+	if f.removes != 1 {
+		t.Fatalf("blocklist replayed on delete retry: %d", f.removes)
+	}
+	if len(q.deletes) != 2 {
+		t.Fatalf("delete was not retried: %d", len(q.deletes))
+	}
+}
+
+// TestRecoverySearchRunsAfterFailedBlocklist proves the replacement search is
+// no longer suppressed when the pre-delete blocklist attempt fails.
+func TestRecoverySearchRunsAfterFailedBlocklist(t *testing.T) {
+	s, q, clock, _, f := recoveryFixture(t, config.Sonarr, config.BlocklistAndSearch)
+	cycle(s, config.Sonarr)
+	f.removeErr = &arr.Error{Outcome: arr.NotFound}
+	acceptRecovery(t, s, clock)
+	if f.removes != 1 {
+		t.Fatalf("expected one blocklist attempt, got %d", f.removes)
+	}
+	q.torrents = nil
+	poll(t, s)
+	for range 4 {
+		cycle(s, config.Sonarr)
+	}
+	if len(f.searches) != 1 || len(s.state.RecoveryJobs) != 0 {
+		t.Fatalf("search must run after confirmed removal despite failed blocklist: searches=%v jobs=%v", f.searches, s.Snapshot().RecoveryJobs)
 	}
 }

@@ -54,18 +54,22 @@ type IntegrationStatus struct {
 }
 
 type RecoveryStatus struct {
-	ID         string              `json:"id"`
-	Kind       config.ArrKind      `json:"kind"`
-	Stage      store.RecoveryStage `json:"stage"`
-	Mode       config.ArrMode      `json:"mode"`
-	Code       string              `json:"code,omitempty"`
-	ShortHash  string              `json:"short_hash,omitempty"`
-	Policy     config.PolicyID     `json:"policy,omitempty"`
-	CommandID  int64               `json:"command_id,omitempty"`
-	CapturedAt time.Time           `json:"captured_at"`
-	ExpiresAt  time.Time           `json:"expires_at"`
-	NextAt     time.Time           `json:"next_at"`
-	Attempts   int                 `json:"attempts"`
+	ID    string              `json:"id"`
+	Kind  config.ArrKind      `json:"kind"`
+	Stage store.RecoveryStage `json:"stage"`
+	Mode  config.ArrMode      `json:"mode"`
+	Code  string              `json:"code,omitempty"`
+	// BlocklistCode is the outcome of the one best-effort blocklist attempt
+	// made before qBittorrent deletion, kept separate from Code so the UI can
+	// show the blocklist step even while the job is still resolving.
+	BlocklistCode string          `json:"blocklist_code,omitempty"`
+	ShortHash     string          `json:"short_hash,omitempty"`
+	Policy        config.PolicyID `json:"policy,omitempty"`
+	CommandID     int64           `json:"command_id,omitempty"`
+	CapturedAt    time.Time       `json:"captured_at"`
+	ExpiresAt     time.Time       `json:"expires_at"`
+	NextAt        time.Time       `json:"next_at"`
+	Attempts      int             `json:"attempts"`
 }
 
 func (s *Service) initRecovery() {
@@ -228,6 +232,61 @@ func (s *Service) prepareRecovery(t qbt.Torrent, episode store.Episode) {
 	}
 }
 
+// blocklistBeforeDelete makes one best-effort blocklist attempt per matching
+// integration while the torrent is still present in qBittorrent, so the media
+// manager's queue row cannot be lost to its own import loop before the release
+// is blocklisted. Failures are recorded and never retried; qBittorrent cleanup
+// proceeds regardless.
+//
+// The caller holds s.mu.
+func (s *Service) blocklistBeforeDelete(ctx context.Context, t qbt.Torrent) {
+	now := s.clock.Now().UTC()
+	for id, job := range s.state.RecoveryJobs {
+		if job.Hash != t.Hash || job.Stage != store.Prepared || !job.Mode.Blocklists() || !job.BlocklistAt.IsZero() {
+			continue
+		}
+		r := s.integrations[job.Kind]
+		if r == nil || r.client == nil || !r.config.Enabled {
+			job.BlocklistAt, job.BlocklistCode = now, string(arr.Unreachable)
+			s.state.RecoveryJobs[id] = job
+			continue
+		}
+		mapped, ok := s.mappedQueueItem(r, job, t.Hash)
+		if !ok {
+			job.BlocklistAt, job.BlocklistCode = now, string(arr.NotFound)
+			s.state.RecoveryJobs[id] = job
+			continue
+		}
+		// Durable intent before the call: a crash after this write must not
+		// replay the blocklist, because a second DELETE could blocklist the
+		// replacement release instead.
+		job.BlocklistAt = now
+		s.state.RecoveryJobs[id] = job
+		s.persist()
+		if s.view.PersistenceError != "" {
+			continue
+		}
+		err := r.client.RemoveJob(ctx, mapped)
+		job.BlocklistCode = string(arr.OutcomeOf(err))
+		s.state.RecoveryJobs[id] = job
+		s.persist()
+	}
+}
+
+// mappedQueueItem resolves the queue identity for one job without performing
+// I/O: durable ids captured at reservation time win, otherwise a fresh cached
+// queue snapshot is matched by hash. A stale or absent snapshot yields false so
+// the caller records the attempt as not found rather than guessing.
+func (s *Service) mappedQueueItem(r *integrationRuntime, job store.RecoveryJob, hash string) (arr.Job, bool) {
+	if len(job.QueueIDs) > 0 && len(job.MediaIDs) > 0 {
+		return arr.Job{DownloadID: hash, ItemIDs: slices.Clone(job.QueueIDs), MediaIDs: slices.Clone(job.MediaIDs)}, true
+	}
+	if !r.queueAt.IsZero() && s.clock.Now().Sub(r.queueAt) <= queueFreshness {
+		return r.client.Map(r.queue, hash)
+	}
+	return arr.Job{}, false
+}
+
 func (s *Service) releaseRecovery(hash string) {
 	for id, job := range s.state.RecoveryJobs {
 		if job.Hash == hash && job.Stage == store.Prepared {
@@ -284,7 +343,7 @@ func (s *Service) recoverySnapshot(now time.Time) ([]IntegrationStatus, []Recove
 	jobs := make([]RecoveryStatus, 0, len(s.state.RecoveryJobs))
 	for _, j := range s.state.RecoveryJobs {
 		s.metrics.RecoveryPending.WithLabelValues(string(j.Kind), string(j.Stage)).Inc()
-		jobs = append(jobs, RecoveryStatus{ID: j.ID, Kind: j.Kind, Stage: j.Stage, Mode: j.Mode, Code: j.LastCode, ShortHash: qbt.ShortHash(j.Hash), Policy: j.Policy, CommandID: j.CommandID, CapturedAt: j.CapturedAt, ExpiresAt: j.ExpiresAt, NextAt: j.NextAt, Attempts: j.Attempts})
+		jobs = append(jobs, RecoveryStatus{ID: j.ID, Kind: j.Kind, Stage: j.Stage, Mode: j.Mode, Code: j.LastCode, BlocklistCode: j.BlocklistCode, ShortHash: qbt.ShortHash(j.Hash), Policy: j.Policy, CommandID: j.CommandID, CapturedAt: j.CapturedAt, ExpiresAt: j.ExpiresAt, NextAt: j.NextAt, Attempts: j.Attempts})
 	}
 	sort.Slice(jobs, func(i, j int) bool {
 		if jobs[i].Kind != jobs[j].Kind {
@@ -495,7 +554,9 @@ func (s *Service) advanceRecovery(ctx context.Context, r *integrationRuntime, jo
 			}
 			next.QueueIDs, next.MediaIDs = slices.Clone(mapped.ItemIDs), slices.Clone(mapped.MediaIDs)
 		}
-		if job.Mode.Blocklists() && found {
+		if job.BlocklistAt.IsZero() && job.Mode.Blocklists() && found {
+			// Jobs created before the pre-delete blocklist change still walk
+			// the old blocklist-after-deletion path.
 			next.Stage = store.BlocklistPending
 		} else if job.Mode.Searches() {
 			// A vanished queue item in a searching mode is not an abandonment:
@@ -529,9 +590,17 @@ func (s *Service) advanceRecovery(ctx context.Context, r *integrationRuntime, jo
 			}
 			next.Stage = store.SearchPending
 		} else {
-			// blocklist_only with a vanished queue item: nothing to blocklist
-			// and nothing to search.
-			s.applyRecovery(ctx, r, job, job, "queue_vanished")
+			// blocklist_only: new jobs carry the pre-delete attempt's outcome;
+			// legacy jobs (empty BlocklistCode) never blocklisted, matching the
+			// old queue_vanished outcome.
+			code := "queue_vanished"
+			if job.BlocklistCode != "" {
+				code = "blocklist_completed"
+				if job.BlocklistCode != string(arr.Accepted) {
+					code = job.BlocklistCode
+				}
+			}
+			s.applyRecovery(ctx, r, job, job, code)
 			return
 		}
 		next.Attempts, next.LastCode = 0, ""

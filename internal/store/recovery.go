@@ -51,6 +51,11 @@ type RecoveryJob struct {
 	Attempts   int             `json:"attempts"`
 	CommandID  int64           `json:"command_id"`
 	LastCode   string          `json:"last_code"`
+	// BlocklistAt records the durable intent to make the one best-effort
+	// blocklist attempt before qBittorrent deletion; BlocklistCode records its
+	// outcome. Both are written before the call so a crash cannot replay it.
+	BlocklistAt   time.Time `json:"blocklist_at,omitempty"`
+	BlocklistCode string    `json:"blocklist_code,omitempty"`
 }
 
 func (j RecoveryJob) Clone() RecoveryJob {
@@ -64,7 +69,7 @@ func (j RecoveryJob) Valid() bool {
 	if !digest(j.ID) || !digest(j.Endpoint) || !qbt.ValidHash(j.Hash) || j.Hash != strings.ToLower(j.Hash) ||
 		(j.Kind != config.Sonarr && j.Kind != config.Radarr) || !j.Policy.Valid() || !j.Action.Destructive() || !j.Mode.Valid() ||
 		j.CapturedAt.IsZero() || j.EpisodeAt.IsZero() || j.ExpiresAt.Before(j.CapturedAt) || j.ExpiresAt.Sub(j.CapturedAt) > RecoveryTTL ||
-		j.Attempts < 0 || j.Attempts > MaxRecoveryAttempts || j.CommandID < 0 || !RecoveryCode(j.LastCode) {
+		j.Attempts < 0 || j.Attempts > MaxRecoveryAttempts || j.CommandID < 0 || !RecoveryCode(j.LastCode) || !RecoveryCode(j.BlocklistCode) {
 		return false
 	}
 	for _, ids := range [][]int64{j.QueueIDs, j.HistoryIDs, j.MediaIDs} {

@@ -1,9 +1,4 @@
-VERSION ?= $(shell version=$$(git describe --tags --dirty --match 'v[0-9]*' 2>/dev/null); test -n "$$version" && printf '%s' "$$version" | cut -c2- || printf 'dev')
-REVISION ?= $(shell git rev-parse --verify 'HEAD^{commit}' 2>/dev/null || echo unknown)
-BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -s -w -buildid= -X main.version=$(VERSION) -X main.revision=$(REVISION) -X main.buildDate=$(BUILD_DATE)
-
-.PHONY: fmt test race vet build docker-build
+.PHONY: fmt test race vet build container-binaries docker-build
 fmt:
 	gofmt -w .
 test:
@@ -13,9 +8,10 @@ race:
 vet:
 	go vet ./...
 build:
-	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="$(LDFLAGS)" ./cmd/qbt-watchdog
-docker-build:
-	docker build -t qbt-watchdog:test \
-		--build-arg VERSION=$(VERSION) \
-		--build-arg REVISION=$(REVISION) \
-		--build-arg BUILD_DATE=$(BUILD_DATE) .
+	CGO_ENABLED=0 go build -trimpath ./cmd/qbt-watchdog
+container-binaries:
+	mkdir -p dist/linux/amd64 dist/linux/arm64
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/linux/amd64/qbt-watchdog ./cmd/qbt-watchdog
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o dist/linux/arm64/qbt-watchdog ./cmd/qbt-watchdog
+docker-build: container-binaries
+	docker build -t qbt-watchdog:test .

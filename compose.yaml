@@ -1,6 +1,8 @@
 services:
   qbt-watchdog:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
     image: qbt-watchdog:local
     restart: unless-stopped
     read_only: true
@@ -9,14 +11,17 @@ services:
     networks:
       - qbt
     ports:
-      - "127.0.0.1:8090:8080"
+      - "127.0.0.1:8080:8080"
     command: ["--config", "/config/config.yaml"]
     volumes:
-      - ./config:/config:ro
-      - ./secrets:/run/secrets:ro
-      - ./watchdog-data:/data
+      # Writable directory mount: the Settings editor saves config.yaml and
+      # .env here with a temp-file-and-rename in the config directory.
+      - ./config:/config
+      - qbt-watchdog-data:/data
+
+volumes:
+  qbt-watchdog-data:
 
 networks:
   qbt:
-    external: true
     name: ${QBT_NETWORK:-qbt}

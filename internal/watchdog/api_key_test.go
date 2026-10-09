@@ -81,7 +81,7 @@ func testAPIKeyRotationRebuildsClientAndRestartsTimers(t *testing.T, source stri
 	}
 	clock := &fakeClock{now: time.Now().UTC()}
 	disk := &memoryStore{}
-	build := observability.NewBuild("test", "test", "test")
+	build := testBuild()
 	metrics := observability.New(build)
 	s := New(c, client, disk, clock, log, metrics, build)
 	poll(t, s)
@@ -162,7 +162,7 @@ func TestBearerPollAuthenticationFailureIsSanitized(t *testing.T) {
 			}
 			defer client.CloseIdleConnections()
 			var logs bytes.Buffer
-			build := observability.NewBuild("test", "test", "test")
+			build := testBuild()
 			disk := &memoryStore{}
 			s := New(c, client, disk, RealClock{}, slog.New(slog.NewTextHandler(&logs, nil)), observability.New(build), build)
 			err = s.Poll(context.Background())

@@ -96,3 +96,28 @@ func TestRecoveryJobNewFieldsRoundTrip(t *testing.T) {
 		t.Fatalf("recovery job fields did not round-trip: %+v", got)
 	}
 }
+
+func TestRecoveryJobBlocklistFieldsRoundTrip(t *testing.T) {
+	now := time.Now().UTC()
+	s := Empty()
+	job := RecoveryJob{
+		ID: strings.Repeat("a", 64), Kind: config.Sonarr,
+		Endpoint: strings.Repeat("b", 64), Hash: strings.Repeat("c", 40),
+		Name: "The Example Episode", Policy: config.Metadata, Action: config.Delete,
+		EpisodeAt: now.Add(-2 * time.Hour), CapturedAt: now.Add(-time.Hour),
+		AcceptedAt: now.Add(-50 * time.Minute), DeletedAt: now.Add(-30 * time.Minute), ExpiresAt: now.Add(23 * time.Hour),
+		Mode: config.BlocklistAndSearch, Stage: Resolving,
+		QueueIDs: []int64{1}, MediaIDs: []int64{11},
+		BlocklistAt: now.Add(-45 * time.Minute), BlocklistCode: "not_found",
+	}
+	s.RecoveryJobs[job.ID] = job
+	f := write(t, s)
+	loaded, err := f.Load(now)
+	if err != nil {
+		t.Fatal("recovery job with blocklist fields rejected", err)
+	}
+	got := loaded.RecoveryJobs[job.ID]
+	if !got.BlocklistAt.Equal(job.BlocklistAt) || got.BlocklistCode != "not_found" {
+		t.Fatalf("blocklist fields did not round-trip: %+v", got)
+	}
+}

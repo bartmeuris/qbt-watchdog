@@ -1,369 +1,112 @@
-# qbt-watchdog configuration.
+# qbt-watchdog configuration reference.
+# Every key is shown with its default (or a required example). See
+# docs/configuration.md for types, semantics, reloading and authentication modes.
+# TOML is accepted too; key names and values are identical.
 #
-# This file is the entire configuration surface: there are no per-setting
-# command-line flags and no per-setting environment variables. The only
-# command line is `--config PATH`, `--once`, `--help`, and the `version` and
-# `healthcheck` subcommands; QBTW_CONFIG supplies the path when `--config` is
-# not given.
-#
-# Environment values are used only where this file asks for them by name: any
-# parsed string value may contain `${NAME}` references, and `$$` writes a
-# literal dollar. Nothing else is substituted — `$HOME`, backticks and `$(...)`
-# stay literal, resolved values are never re-expanded, and keys, numbers and
-# booleans are never rewritten. A `${NAME}` that no source defines is an error:
-# the candidate configuration is rejected instead of authenticating with a
-# literal `${NAME}` string.
-#
-# Each `${NAME}` is resolved from the process environment first, then from an
-# optional `.env` file sitting next to the resolved config file (not
-# necessarily the working directory); see .env.example. The `.env` is watched and
-# re-read when it changes, including atomic replacements, so a rotated secret needs no
-# restart — but a variable inherited from the process environment shadows `.env`
-# until the watchdog is restarted, because a running process cannot change its
-# own environment.
-#
-# Supported .env syntax is deliberately not a shell: one NAME=value assignment
-# per line; optional `export`; spaces around `=`; blank lines, comments and CRLF
-# accepted. Duplicate names use the last value. Unquoted values end at a `#`
-# only when it starts the value or follows whitespace. Single quotes are fully
-# literal. Double quotes decode only \n, \r, \t, \\, \" and \$; other escapes,
-# multiline quotes and trailing tokens are rejected.
-#
-# Every key below is shown with its documented default or a required example
-# value, plus inert example URLs for disabled Sonarr/Radarr blocks. `qbt_url` is
-# required and has no built-in default, and `max_observation_gap` may be omitted
-# to derive its default from `poll_interval`. Deleting everything except
-# `qbt_url` keeps the same active behaviour. Unknown keys and values of the
-# wrong type are rejected: the process refuses to start rather than silently
-# ignore a typo.
-#
-# TOML is accepted too (`--config /etc/qbt-watchdog/config.toml`); the key
-# names and values are identical.
-#
-# ---------------------------------------------------------------------------
-# Reloading
-# ---------------------------------------------------------------------------
-# The file is re-read automatically whenever it or a referenced dependency
-# changes; there is no need to restart or send a signal. Atomic replacements
-# (write-to-temp then rename) and Kubernetes ConfigMap/Secret symlink swaps are
-# detected, and rapid bursts of writes are debounced into a single reload.
-#
-# If a reload is invalid, the previously running configuration is kept in full,
-# the problem is logged, and the error is surfaced in the status payload and on
-# the readiness endpoint until a good file is written.
-#
-# RESTART REQUIRED — changing either of these is rejected with a warning and
-# the entire candidate is discarded, so the running configuration stays
-# internally consistent:
-#     listen        (the socket is already bound)
-#     state_file    (the episode store is already open)
-#
-# APPLIED LIVE — everything else, including the qBittorrent endpoint,
-# credentials (including API key), TLS settings (the HTTP client is rebuilt),
-# all six policies, every interval, the category/tag exclusions, tag_sync,
-# log_level, log_format, the readiness and UI settings, and Sonarr/Radarr integrations.
-# Password files, API key files, integration key files, .env, and the CA bundle
-# are watched and re-read when they change, so rotating a mounted secret needs
-# no restart.
-#
-# Note that changing anything that affects qBittorrent cleanup safety — a
-# policy, dry_run, an interval, the exclusions, the action cap, qBittorrent
-# credentials (including API key), or TLS CA/insecure verification settings —
-# resets policy timers as applicable, so no torrent inherits unsafe elapsed time
-# across a configuration change. Sonarr/Radarr-only changes do not reset
-# qBittorrent policy clocks. The finite attempt budget and pending requests are
-# deliberately preserved across ordinary safety reloads. Exception: changing the
-# qBittorrent endpoint clears per-torrent clocks, pending request markers, retry
-# budgets and seeder observations, because old endpoint-scoped state cannot be
-# trusted for a different WebUI.
+# Reload behaviour:
+#   RESTART REQUIRED — state_file and listen cannot change at runtime; a change
+#     is rejected with a warning and the running value is kept.
+#   APPLIED LIVE — everything else, including the qBittorrent endpoint,
+#     credentials, policies, timing, integrations and logging, is applied on
+#     the next reload without a restart.
 
-# ---------------------------------------------------------------------------
-# qBittorrent endpoint
-# ---------------------------------------------------------------------------
+# --- qBittorrent endpoint -------------------------------------------------
+qbt_url: "http://qbittorrent:8080"       # Required. HTTP(S) base URL, no credentials/query/fragment.
 
-# Base URL of the qBittorrent Web UI. Required. Must be http:// or https://
-# with no embedded credentials, query string or fragment.
-qbt_url: "http://qbittorrent:8080"
+# --- Authentication (choose one mode) -------------------------------------
+# API key mode (qBittorrent >= 5.2.0): set qbt_api_key or qbt_api_key_file.
+qbt_api_key: ""                          # Bearer token. Mutually exclusive with the username/password mode.
+qbt_api_key_file: ""                     # File holding the API key; trailing CR/LF stripped, re-read on change.
+# Username/password mode (SID cookie): set qbt_username and exactly one password source.
+qbt_username: ""                         # WebUI username. Requires a password.
+qbt_password: ""                         # Inline password. Mutually exclusive with qbt_password_file.
+qbt_password_file: ""                    # Password file; trailing CR/LF stripped, re-read on change.
+# Bypass mode: leave every credential above empty.
 
-# Authentication — choose one of three modes:
-#
-#   1. API key (qBittorrent >= 5.2.0, WebAPI >= 2.14.1):
-#      Supply qbt_api_key or qbt_api_key_file. The key is sent as a Bearer
-#      token in the Authorization header. No cookie jar is created and no
-#      login endpoint is called. qBittorrent must have API-key authentication
-#      enabled in its Web UI settings.
-#
-#   2. Username + password (SID cookie authentication):
-#      Supply both qbt_username and qbt_password (or qbt_password_file). The
-#      client logs in via /api/v2/auth/login, stores the SID cookie, and
-#      reauthenticates once on session expiry. Mutations are never retried
-#      after reauthentication.
-#
-#   3. Bypass (no credentials):
-#      Leave all authentication fields empty. The client omits explicit login
-#      and relies on qBittorrent's local-network authentication bypass. Do not
-#      broaden that policy just to deploy this service.
-#
-# API-key and username/password modes are mutually exclusive. Username + password
-# mode requires both a username and a password (inline or file). API-key mode
-# accepts either qbt_api_key or qbt_api_key_file; no other auth fields are
-# needed.
+# --- Safety ---------------------------------------------------------------
+dry_run: true                            # While true every action is downgraded to warn; tag writes are suppressed.
+max_actions_per_poll: 10                 # Actions (including warnings) allowed per poll; 0 disables all actions.
 
-# API key for qBittorrent >= 5.2.0. Mutually exclusive with qbt_api_key_file,
-# qbt_username, qbt_password and qbt_password_file.
-qbt_api_key: ""
-
-# File containing the API key. Trailing newline is stripped. Re-read on change.
-qbt_api_key_file: ""
-
-# Web UI username for SID cookie auth. Requires a password.
-qbt_username: ""
-
-# Supply the password either inline or from a file, never both. The file's
-# trailing newline is stripped. Prefer the file: it keeps the secret out of the
-# configuration and it is re-read when the file changes. Secrets are never logged and
-# never appear in the status payload, the metrics, the UI or any error message.
-qbt_password: ""
-qbt_password_file: ""
-
-# ---------------------------------------------------------------------------
-# Safety
-# ---------------------------------------------------------------------------
-
-# While true, every policy behaves as if its action were "warn": nothing is
-# ever deleted, and tag_sync writes/sweeps are suppressed. Turning this off is
-# logged loudly at startup and on reload.
-dry_run: true
-
-# Upper bound on actions (including warnings) per poll. When dry_run is true,
-# warn actions are still counted toward this cap. 0 means the watchdog takes no
-# action at all, however the policies are configured.
-max_actions_per_poll: 10
-
-# Optional qBittorrent tag write-back in a reserved namespace. Exact-prefix
-# exclude_tags and policy match_tags are rejected; case-insensitive near-misses
-# only warn. dry_run suppresses all tag writes and cleanup sweeps. Existing tags
-# are changed only when an add/remove delta exists.
 tag_sync:
-  enabled: false
-  prefix: "qbtw-"
-  max_writes_per_poll: 20
-# To change a claimed prefix, keep tag_sync disabled with the new prefix and
-# dry_run: false until old tags are swept (sweeps are suppressed in dry-run),
-# then re-enable. Renaming/removing state loses tracking
-# history, counters, retry budgets, and recovery jobs.
+  enabled: false                         # Write <prefix><policy> / <prefix>due status tags back to qBittorrent.
+  prefix: "qbtw-"                        # Reserved tag namespace; at least 4 chars, no commas or whitespace.
+  max_writes_per_poll: 20                # Cap on tag add/remove deltas per poll (independent of the action cap).
 
-# ---------------------------------------------------------------------------
-# Policies
-# ---------------------------------------------------------------------------
-# The six policies are mutually exclusive and share the same shape: an action,
-# a threshold and optional per-policy Arr recovery mode. stopped_arr_managed
-# also requires match_tags. A torrent must match the same policy continuously for the
-# whole threshold before the action is taken; any change of state, progress or
-# seeder observation starts the clock again.
-#
-#   action:
-#     warn         report only, never touch the torrent (default)
-#     delete       remove the torrent, keep the downloaded files
-#     delete_file  remove the torrent and its downloaded files — irreversible
-#
-#   threshold: a positive Go duration such as "45m", "2h", "90s".
-#
-#   arr_mode:
-#     inherit               use the matching integration's mode (default)
-#     none                  do no Sonarr/Radarr recovery for this policy
-#     blocklist_and_search  override the integration mode for this policy
-#     blocklist_only        override the integration mode for this policy
-#     search_only           override the integration mode for this policy
-#
-# dry_run overrides every action to "warn", so a destructive action needs both
-# the action here and dry_run: false.
-
+# --- Policies (mutually exclusive; action + threshold, optional arr_mode) -
 policies:
-  # Torrents stuck fetching metadata (state metaDL).
   metadata:
-    action: "warn"
-    threshold: "30m"
-
-  # Stalled downloads with zero progress whose connected seeders have never
-  # been observed. These are the most likely to be genuinely dead.
+    action: "warn"                       # warn | delete | delete_file.
+    threshold: "30m"                     # Continuous match time before the action.
   stalled_no_seeders:
     action: "warn"
     threshold: "30m"
-
-  # Stalled downloads with zero progress that did have connected seeders at
-  # some earlier observation, so the swarm may simply be idle.
   stalled_seeders_seen:
     action: "warn"
     threshold: "30m"
-
-  # Stalled downloads that already fetched some payload. Deleting these
-  # discards real work; treat with the most caution.
   stalled_partial:
     action: "warn"
-    threshold: "30m"
-
-  # Completed/seeding torrents that qBittorrent reports as having metadata but
-  # no payload size and no downloaded bytes. Prefer delete over delete_file when
-  # promoting this policy, because the policy is specifically for no-data cases.
+    threshold: "30m"                     # This policy acts despite downloaded bytes; treat with caution.
   completed_no_data:
     action: "warn"
     threshold: "2m"
-    arr_mode: inherit
-
-  # Stopped/paused Arr-managed torrents are considered only when they carry at
-  # least one of these operator-managed tags. Watchdog tags under tag_sync.prefix
-  # never count as matches. match_tags is mandatory for this policy.
+    arr_mode: inherit                    # inherit | none | blocklist_and_search | blocklist_only | search_only.
   stopped_arr_managed:
     action: "warn"
     threshold: "10m"
-    match_tags: ["Sonarr", "Radarr"]
+    match_tags: ["Sonarr", "Radarr"]     # Required non-empty; only operator-stopped torrents carrying a tag match.
     arr_mode: inherit
 
-# ---------------------------------------------------------------------------
-# Timing
-# ---------------------------------------------------------------------------
+# --- Timing ---------------------------------------------------------------
+poll_interval: "30s"                     # Interval between completed polls; must be positive.
+max_observation_gap: "90s"               # Max gap still counted as continuous; defaults to 3 x poll_interval.
+http_timeout: "10s"                      # Per-request timeout against the qBittorrent API.
+delete_confirmation_timeout: "2m"        # Wait for a requested deletion to disappear before retrying.
 
-# How often qBittorrent is polled. Must be positive.
-poll_interval: "30s"
+# --- Scope ----------------------------------------------------------------
+include_categories: []                   # Empty means all; non-empty is an exact, case-sensitive allowlist.
+exclude_categories: []                   # Exact denylist; exclusion wins over inclusion.
+exclude_tags: ["keep", "qbt-watchdog-ignore"] # Torrents carrying any of these tags are never considered.
 
-# How long a gap between two observations may be before an episode is treated
-# as interrupted and its timer restarted. Defaults to three poll intervals,
-# which tolerates two missed polls.
-max_observation_gap: "90s"
-
-# Per-request timeout against the qBittorrent API.
-http_timeout: "10s"
-
-# After a deletion is requested, how long the watchdog waits for qBittorrent to
-# confirm the torrent is gone before retrying.
-delete_confirmation_timeout: "2m"
-
-# ---------------------------------------------------------------------------
-# Scope
-# ---------------------------------------------------------------------------
-# Names are compared case sensitively, exactly as qBittorrent reports them;
-# surrounding whitespace is trimmed. Exact reserved-prefix operator tags are
-# rejected; case-insensitive near-misses load with a warning.
-
-# When non-empty, only these categories are considered.
-include_categories: []
-
-# Categories never considered. Applied after include_categories.
-exclude_categories: []
-
-# Torrents carrying any of these tags are never considered. The defaults give
-# operators a per-torrent opt-out.
-exclude_tags: ["keep", "qbt-watchdog-ignore"]
-
-# ---------------------------------------------------------------------------
-# Sonarr / Radarr recovery integrations
-# ---------------------------------------------------------------------------
-# Disabled by default. With an enabled integration, the watchdog can ask Sonarr
-# or Radarr to recover a torrent after qBittorrent has accepted deletion and a
-# later successful full poll confirms the torrent disappeared. Recovery also
-# requires dry_run: false and a destructive torrent policy (delete or
-# delete_file); warn and dry-run modes never mutate Arr.
-#
-# Enabled integrations require a URL and exactly one credential source
-# (api_key or api_key_file). Empty categories match every qBittorrent category;
-# configured categories are exact, case-sensitive matches.
-#
-# mode:
-#   blocklist_and_search  remove the Arr queue item with blocklist=true,
-#                         removeFromClient=false and skipRedownload=true, then
-#                         issue a targeted EpisodeSearch or MoviesSearch.
-#   blocklist_only        remove the Arr queue item with blocklist=true,
-#                         removeFromClient=false and skipRedownload=true,
-#                         without asking for a replacement.
-#   search_only           issue only the targeted search, without blocklisting.
-
+# --- Sonarr / Radarr recovery (disabled by default) -----------------------
+# Recovery ordering: while the torrent is still present in qBittorrent the
+# watchdog makes ONE best-effort blocklist attempt (removeFromClient=false,
+# blocklist=true, skipRedownload=true, changeCategory=false). It is never
+# retried. The qBittorrent delete then proceeds regardless of that outcome, and
+# a replacement search runs only after a later full poll confirms the torrent
+# disappeared. This keeps the release blocklisted even when the media manager
+# drops its own queue row before the watchdog can act.
 integrations:
   sonarr:
     enabled: false
-    url: "http://sonarr:8989"
-    api_key: ""
-    # api_key: "${SONARR_API_KEY}"
+    url: "http://sonarr:8989"            # Required with a credential while enabled.
+    api_key: ""                          # Provide exactly one of api_key / api_key_file.
     api_key_file: ""
-    categories: []
-    mode: blocklist_and_search
-    timeout: "10s"
-
+    categories: []                       # Empty matches every category; otherwise exact, case-sensitive.
+    mode: blocklist_and_search           # blocklist_and_search | blocklist_only | search_only.
+    timeout: "10s"                       # Positive, at most 5m.
   radarr:
     enabled: false
     url: "http://radarr:7878"
     api_key: ""
-    # api_key: "${RADARR_API_KEY}"
     api_key_file: ""
     categories: []
     mode: blocklist_and_search
     timeout: "10s"
 
-# ---------------------------------------------------------------------------
-# State
-# ---------------------------------------------------------------------------
+# --- State ----------------------------------------------------------------
+state_file: "/data/state.json"           # Persistence path. RESTART REQUIRED to change.
+history_limit: 100                       # Retained history entries, 1-10000.
 
-# Where episode timers and the action history are persisted. RESTART REQUIRED.
-state_file: "/data/state.json"
+# --- Web interface --------------------------------------------------------
+listen: ":8080"                          # host:port for pages, JSON API, health and metrics. RESTART REQUIRED.
+ui_refresh_interval: "5s"                # Live fragment refresh interval.
+readiness_max_age: "2m"                  # /readyz fails once the last successful poll is older than this.
 
-# How many history entries are retained, between 1 and 10000.
-history_limit: 100
+# --- TLS (outbound qBittorrent client) ------------------------------------
+tls_ca_file: ""                          # PEM bundle for a private CA; re-read on change.
+tls_insecure_skip_verify: false          # Development-only; disables certificate verification.
 
-# ---------------------------------------------------------------------------
-# Web interface
-# ---------------------------------------------------------------------------
-
-# host:port for the four web UI pages (Overview, Active policies, Activity and
-# Settings), the JSON API, /healthz, /readyz and /metrics. RESTART REQUIRED.
-listen: ":8080"
-
-# How often the Overview and Activity live fragments refresh themselves.
-ui_refresh_interval: "5s"
-
-# /readyz reports not-ready once the last successful poll is older than this.
-readiness_max_age: "2m"
-
-# The Settings page edits this file through a structured, source-preserving form
-# (with a raw editor behind an advanced disclosure); every secret offers Value,
-# Env var or Path sources, and the Connections section shows only the credentials
-# the selected qBittorrent auth mode can use. listen and state_file are shown
-# read-only because they require a restart.
-#
-# There is no built-in web authentication. The UI pages, JSON API, settings
-# editor and manual actions are served to anyone who can reach `listen`, and
-# /metrics is always served without credentials. Deploy behind a reverse proxy
-# that terminates TLS and enforces access control, and never expose `listen`
-# directly to an untrusted network. The former web_username, web_password,
-# web_password_file and metrics_public settings no longer exist; a configuration
-# that still carries them is rejected with a migration error naming the keys to
-# delete ("built-in web authentication was removed; delete … and enforce access
-# control with a reverse proxy").
-
-# ---------------------------------------------------------------------------
-# TLS
-# ---------------------------------------------------------------------------
-
-# PEM bundle used to verify a qBittorrent instance with a private CA. Read at
-# load time and watched, so rotating the bundle is picked up without restart.
-tls_ca_file: ""
-
-# Development-only escape hatch. Enabling it disables certificate verification
-# entirely and is logged loudly.
-tls_insecure_skip_verify: false
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-# debug, info, warn or error. Applied live.
-log_level: "info"
-
-# json, text or console. Applied live. The default is "json"; choose "console"
-# for human-readable terminal output (one line per record, colored level when
-# log_color allows it).
-log_format: "json"
-
-# auto, always or never. Applied live. "auto" colors only when stderr is a
-# real terminal and NO_COLOR is unset; "always" forces color; "never" disables
-# it. Ignored for json and text formats.
-log_color: "auto"
+# --- Logging --------------------------------------------------------------
+log_level: "info"                        # debug | info | warn | error.
+log_format: "json"                       # json | text | console.
+log_color: "auto"                        # auto | always | never; affects console output only.

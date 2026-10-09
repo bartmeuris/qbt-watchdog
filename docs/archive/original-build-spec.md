@@ -1,8 +1,10 @@
-# Build Specification: `qbt-watchdog`
+# Original Build Specification (archived)
 
-> **SUPERSEDED — historical build specification.** This document records the original
-> implementation brief and no longer describes the shipped program. Keep it for
-> provenance, not as a reference. Known divergences from the current build:
+> **Historical, superseded build specification — kept for provenance only.**
+> This is the original implementation brief. It is **NOT** current behavior and must
+> not be used as a reference for operating or deploying the shipped program.
+>
+> Known divergences from the current build:
 >
 > - The UI is now multipage (`/` Overview, `/policies` Active policies, `/activity`
 >   Activity, `/settings` Settings) with a structured, source-preserving settings form
@@ -19,8 +21,8 @@
 >   `stopped_arr_managed`), plus optional Sonarr/Radarr recovery.
 > - Live fragments are reconciled by stable key, and the state schema is now version 4.
 >
-> See [`README.md`](README.md) and [`config.example.yaml`](config.example.yaml) for the
-> current behavior.
+> See [`../../README.md`](../../README.md) and
+> [`../../config.example.yaml`](../../config.example.yaml) for the current behavior.
 
 ## Instruction to the implementation agent
 

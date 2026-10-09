@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -13,13 +14,19 @@ import (
 	"qbt-watchdog/internal/watchdog"
 )
 
+// testBuild returns a deterministic Build for tests that only need the
+// observability surface populated.
+func testBuild() observability.Build {
+	return observability.Build{Version: "test", Revision: "test", CommitTime: "test", GoVersion: runtime.Version()}
+}
+
 func fixture(t *testing.T) (config.Config, *watchdog.Snapshot, *observability.Metrics) {
 	t.Helper()
 	c, e := config.Decode(config.YAML, []byte("qbt_url: 'http://localhost'"))
 	if e != nil {
 		t.Fatal(e)
 	}
-	build := observability.NewBuild("test", "test", "test")
+	build := testBuild()
 	now := time.Now().UTC()
 	s := &watchdog.Snapshot{SchemaVersion: 1, Build: build, DryRun: true, LastTorrentListSuccess: &now, Torrents: []watchdog.Row{{Name: `<script>alert("x")</script>`, ShortHash: "aaaaaaaaaaaa", State: "metaDL", Decision: "tracking"}}, History: nil}
 	return c, s, observability.New(build)

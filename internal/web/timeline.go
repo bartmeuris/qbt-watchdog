@@ -165,6 +165,16 @@ func TorrentTimeline(row watchdog.Row, jobs []watchdog.RecoveryStatus, history [
 			blocklist = StatusCompleted
 			search = StatusRequested
 		}
+		// The one best-effort blocklist attempt happens before qBittorrent
+		// deletion, so its recorded outcome is the most direct evidence of the
+		// Blocklist step; the stage/code derivation above is the fallback.
+		if job.BlocklistCode != "" {
+			if job.BlocklistCode == "accepted" {
+				blocklist = StatusCompleted
+			} else {
+				blocklist = StatusFailed
+			}
+		}
 		if job.Mode != config.SearchOnly && job.Mode != config.NoArrMode {
 			// a blocklist-capable mode is in play; leave blocklist as derived.
 			_ = job.Mode
@@ -230,6 +240,16 @@ func RecoveryTimeline(job watchdog.RecoveryStatus) Timeline {
 		blocklist, search, replacement = StatusCompleted, StatusCompleted, StatusCompleted
 	case "blocklist_failed", "command_failed":
 		blocklist = StatusFailed
+	}
+	// The one best-effort blocklist attempt happens before qBittorrent
+	// deletion, so its recorded outcome is the most direct evidence of the
+	// Blocklist step; the stage/code derivation above is the fallback.
+	if job.BlocklistCode != "" {
+		if job.BlocklistCode == "accepted" {
+			blocklist = StatusCompleted
+		} else {
+			blocklist = StatusFailed
+		}
 	}
 	if job.Mode == config.SearchOnly {
 		blocklist = StatusSkipped

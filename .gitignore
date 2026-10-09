@@ -1,4 +1,5 @@
 /qbt-watchdog
+/dist/
 /secrets/
 /config/
 /config.yaml

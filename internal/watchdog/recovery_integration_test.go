@@ -99,8 +99,8 @@ func TestRecoveryHTTPPackAndMovie(t *testing.T) {
 				t.Fatal("job not durably prepared")
 			}
 			cycle(s, kind)
-			if removed.Load() != 0 {
-				t.Fatal("mutation before confirmation")
+			if removed.Load() != 1 {
+				t.Fatal("blocklist must happen before confirmation")
 			}
 			q.torrents = nil
 			poll(t, s)

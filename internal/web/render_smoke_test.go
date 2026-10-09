@@ -3,6 +3,7 @@ package web
 import (
 	"html/template"
 	"net/http"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ var smokePartials = []string{
 }
 
 func smokeBuild() observability.Build {
-	return observability.NewBuild("smoke", "deadbeef", "2026-09-30")
+	return observability.Build{Version: "smoke", Revision: "deadbeef", CommitTime: "2026-09-30", GoVersion: runtime.Version()}
 }
 
 // smokeGates returns a full gate trace with every gate evaluated, so the

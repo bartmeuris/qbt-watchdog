@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -25,6 +26,12 @@ const hashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 const hashB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 const hashC = "cccccccccccccccccccccccccccccccccccccccc"
 
+// testBuild returns a deterministic Build for tests that only need the
+// observability surface populated.
+func testBuild() observability.Build {
+	return observability.Build{Version: "test", Revision: "test", CommitTime: "test", GoVersion: runtime.Version()}
+}
+
 type fakeClock struct{ now time.Time }
 
 func (c *fakeClock) Now() time.Time          { return c.now }
@@ -40,6 +47,7 @@ type fakeClient struct {
 	adds, removes                                  []string
 	versionCalls, listCalls                        int
 	block                                          func(context.Context)
+	onDelete                                       func(string)
 }
 
 func (f *fakeClient) Versions(context.Context) (string, string, error) {
@@ -74,6 +82,9 @@ func (f *fakeClient) Get(_ context.Context, hash string) (*qbt.Torrent, error) {
 func (f *fakeClient) Delete(_ context.Context, hash string, files bool) error {
 	f.deletes = append(f.deletes, hash)
 	f.files = append(f.files, files)
+	if f.onDelete != nil {
+		f.onDelete(hash)
+	}
 	return f.deleteError
 }
 func (f *fakeClient) AddTags(_ context.Context, hashes []string, tag string) error {
@@ -131,7 +142,7 @@ func fixture(t *testing.T) (*Service, *fakeClient, *fakeClock, *memoryStore) {
 	clock := &fakeClock{time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)}
 	client := &fakeClient{torrents: []qbt.Torrent{torrent(hashA)}}
 	disk := &memoryStore{}
-	build := observability.NewBuild("test", "test", "test")
+	build := testBuild()
 	service := New(c, client, disk, clock, slog.New(slog.NewTextHandler(io.Discard, nil)), observability.New(build), build)
 	return service, client, clock, disk
 }
