@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"fmt"
 	"runtime"
 	"runtime/debug"
 )
@@ -23,6 +24,22 @@ type Build struct {
 func NewBuild() Build {
 	info, _ := debug.ReadBuildInfo()
 	return buildFrom(info)
+}
+
+// Summary renders a one-line, human-readable build description for CLI help
+// and diagnostics. Revision is shortened to 12 characters; unknown values are
+// rendered as "-".
+func (b Build) Summary() string {
+	return fmt.Sprintf("%s revision %s %s %s", b.Version, revisionOrDash(b.Revision), b.GoVersion, b.Platform)
+}
+
+// revisionOrDash shortens a known revision and renders an unknown one as "-".
+// shortRevision is reused rather than duplicating the 12-character rule.
+func revisionOrDash(revision string) string {
+	if revision == "" || revision == "unknown" {
+		return "-"
+	}
+	return shortRevision(revision)
 }
 
 // buildFrom parses a debug.BuildInfo into a Build. It is side-effect free so

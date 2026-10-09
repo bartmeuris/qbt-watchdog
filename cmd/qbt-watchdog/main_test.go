@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,14 +10,33 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"qbt-watchdog/internal/observability"
 )
 
 func TestVersionAndHelp(t *testing.T) {
-	for _, args := range [][]string{{"version"}, {"--help"}} {
+	for _, args := range [][]string{{"version"}, {"-version"}, {"--version"}} {
 		var out, err bytes.Buffer
-		if code := run(args, &out, &err); code != 0 || out.Len() == 0 {
-			t.Fatal(code, out.String(), err.String())
+		if code := run(args, &out, &err); code != 0 {
+			t.Fatalf("%v: exit code %d, stderr %s", args, code, err.String())
 		}
+		var payload struct {
+			Version   string `json:"version"`
+			GoVersion string `json:"go_version"`
+		}
+		if decodeErr := json.Unmarshal(out.Bytes(), &payload); decodeErr != nil {
+			t.Fatalf("%v: output is not JSON: %v (%q)", args, decodeErr, out.String())
+		}
+		if payload.Version == "" || payload.GoVersion == "" {
+			t.Fatalf("%v: missing version or go_version: %q", args, out.String())
+		}
+	}
+	var out, err bytes.Buffer
+	if code := run([]string{"--help"}, &out, &err); code != 0 {
+		t.Fatalf("--help: exit code %d, stderr %s", code, err.String())
+	}
+	if !strings.Contains(out.String(), "Usage:") || !strings.Contains(out.String(), observability.NewBuild().Summary()) {
+		t.Fatalf("--help output missing usage or build summary: %q", out.String())
 	}
 }
 

@@ -29,7 +29,7 @@ Race tests require a supported platform and a C compiler; do not disable CGO for
 
 ## Build metadata
 
-Binaries self-describe through Go's native build information (`runtime/debug.ReadBuildInfo`); there is no `-ldflags` version injection. `./qbt-watchdog version` prints JSON with:
+Binaries self-describe through Go's native build information (`runtime/debug.ReadBuildInfo`); there is no `-ldflags` version injection. `./qbt-watchdog version` (or the equivalent `--version` flag) prints JSON with:
 
 - `version` — release tag (e.g. `v1.2.3`) or pseudo-version, with a `+dirty` suffix when the checkout has uncommitted changes;
 - `revision` — the full VCS commit hash;

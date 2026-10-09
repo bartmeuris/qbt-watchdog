@@ -1,9 +1,10 @@
 // Package config owns the whole configuration surface of qbt-watchdog.
 //
-// The command line is deliberately tiny (--config, --once, --help, plus the
-// version and healthcheck subcommands). QBTW_CONFIG selects the file; other
-// environment values are used only through explicit ${NAME} string references
-// in YAML or TOML, with an optional adjacent .env supplying fallback values.
+// The command line is deliberately tiny (--config, --once, --version, --help,
+// plus the version and healthcheck subcommands). QBTW_CONFIG selects the file;
+// other environment values are used only through explicit ${NAME} string
+// references in YAML or TOML, with an optional adjacent .env supplying fallback
+// values.
 //
 // Parsing is strict: the file is decoded once into an immutable Config value
 // with unknown keys rejected, and every field is validated at that boundary.
@@ -353,8 +354,12 @@ func FormatFor(path string) (Format, error) {
 	return "", errors.New("configuration file must end in .yaml, .yml or .toml")
 }
 
+// ErrVersion signals that --version was requested. It is not a failure: the
+// caller prints the build information and exits successfully.
+var ErrVersion = errors.New("version requested")
+
 const usage = `Usage: qbt-watchdog [--config FILE] [--once]
-       qbt-watchdog version
+       qbt-watchdog version | --version
        qbt-watchdog healthcheck [--url URL]
 
 All settings live in the configuration file; see config.example.yaml.
@@ -368,6 +373,7 @@ func Parse(args []string, lookupEnv func(string) (string, bool), output io.Write
 	fs.SetOutput(io.Discard)
 	path := fs.String("config", "config.yaml", "configuration file, YAML or TOML (or QBTW_CONFIG)")
 	once := fs.Bool("once", false, "run one poll and exit")
+	version := fs.Bool("version", false, "print version information and exit")
 	fs.Usage = func() {
 		fmt.Fprintln(output, usage)
 		fs.SetOutput(output)
@@ -379,6 +385,9 @@ func Parse(args []string, lookupEnv func(string) (string, bool), output io.Write
 			return Config{}, err
 		}
 		return Config{}, errors.New("invalid command-line flags (use --help)")
+	}
+	if *version {
+		return Config{}, ErrVersion
 	}
 	if fs.NArg() != 0 {
 		return Config{}, errors.New("unexpected positional arguments")

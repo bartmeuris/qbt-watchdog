@@ -126,6 +126,19 @@ func TestHelpNeverReadsEnvironmentOrShowsSecrets(t *testing.T) {
 	}
 }
 
+func TestVersionFlagAndHelp(t *testing.T) {
+	if _, err := Parse([]string{"--version"}, os.LookupEnv, &bytes.Buffer{}); !errors.Is(err, ErrVersion) {
+		t.Fatalf("--version: err = %v, want ErrVersion", err)
+	}
+	var out bytes.Buffer
+	if _, err := Parse([]string{"--help"}, os.LookupEnv, &out); !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("--help: err = %v, want flag.ErrHelp", err)
+	}
+	if !strings.Contains(out.String(), "config") {
+		t.Fatalf("--help output missing usage: %q", out.String())
+	}
+}
+
 func TestFormatDetectionAndEquivalence(t *testing.T) {
 	for _, name := range []string{"config.json", "config", "config.ini"} {
 		if _, err := FormatFor(name); err == nil {

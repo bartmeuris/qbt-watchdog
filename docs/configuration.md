@@ -8,7 +8,7 @@ The configuration is a single YAML (`.yaml`/`.yml`) or TOML (`.toml`) file. Key 
 
 ```
 Usage: qbt-watchdog [--config FILE] [--once]
-       qbt-watchdog version
+       qbt-watchdog version | --version
        qbt-watchdog healthcheck [--url URL]
 ```
 
@@ -17,6 +17,7 @@ Usage: qbt-watchdog [--config FILE] [--once]
 | `--config FILE` | Configuration file path (YAML or TOML). Default: `config.yaml`. |
 | `QBTW_CONFIG`   | Environment variable supplying the config path when `--config` is not given. |
 | `--once`        | Run one poll/action cycle, persist, print a JSON summary, and exit. No HTTP server. Exits `1` on poll or persistence failure, `2` on configuration errors. |
+| `--version`     | Print build information as JSON and exit; equivalent to the `version` subcommand. |
 | `version`       | Print build information as JSON; needs no qBittorrent configuration. |
 | `healthcheck [--url URL]` | HTTP GET a liveness endpoint (default `http://127.0.0.1:8080/healthz`); accepts only HTTP 200. Exits `0` healthy, `1` unhealthy, `2` bad flags/URL. |
 

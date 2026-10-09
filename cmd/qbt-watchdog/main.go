@@ -38,7 +38,12 @@ func run(args []string, out, stderr io.Writer) int {
 		return healthcheck(args[1:], stderr)
 	}
 	c, err := config.Parse(args, os.LookupEnv, out)
+	if errors.Is(err, config.ErrVersion) {
+		_ = json.NewEncoder(out).Encode(build)
+		return 0
+	}
 	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprintf(out, "\nqbt-watchdog %s\n", build.Summary())
 		return 0
 	}
 	if err != nil {
