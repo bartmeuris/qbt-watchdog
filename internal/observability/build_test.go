@@ -182,3 +182,25 @@ func TestNewBuildSelfDescribes(t *testing.T) {
 		t.Fatalf("NewBuild left fields empty: %+v", build)
 	}
 }
+
+func TestBuildSummary(t *testing.T) {
+	const full = "1df74e57cab4e99ab440d987ecece0dee103c0b4"
+	cases := []struct {
+		name     string
+		revision string
+		want     string
+	}{
+		{"empty revision", "", "v1.2.3 revision - go1.27.1 linux/amd64"},
+		{"unknown revision", "unknown", "v1.2.3 revision - go1.27.1 linux/amd64"},
+		{"short revision", "abc", "v1.2.3 revision abc go1.27.1 linux/amd64"},
+		{"full revision", full, "v1.2.3 revision 1df74e57cab4 go1.27.1 linux/amd64"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			build := Build{Version: "v1.2.3", Revision: tc.revision, GoVersion: "go1.27.1", Platform: "linux/amd64"}
+			if got := build.Summary(); got != tc.want {
+				t.Fatalf("Summary() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -31,16 +31,14 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 func run(args []string, out, stderr io.Writer) int {
 	build := observability.NewBuild()
 	if len(args) > 0 && args[0] == "version" {
-		_ = json.NewEncoder(out).Encode(build)
-		return 0
+		return printVersion(out, build)
 	}
 	if len(args) > 0 && args[0] == "healthcheck" {
 		return healthcheck(args[1:], stderr)
 	}
 	c, err := config.Parse(args, os.LookupEnv, out)
 	if errors.Is(err, config.ErrVersion) {
-		_ = json.NewEncoder(out).Encode(build)
-		return 0
+		return printVersion(out, build)
 	}
 	if errors.Is(err, flag.ErrHelp) {
 		fmt.Fprintf(out, "\nqbt-watchdog %s\n", build.Summary())
@@ -137,6 +135,14 @@ func run(args []string, out, stderr io.Writer) int {
 	<-watchDone
 	log.Info("shutdown complete", "event", "shutdown")
 	return exit
+}
+
+// printVersion writes the build as JSON and reports success. Both the
+// positional `version` command and the `--version` flag share it so the two
+// entry points can never drift apart.
+func printVersion(out io.Writer, build observability.Build) int {
+	_ = json.NewEncoder(out).Encode(build)
+	return 0
 }
 
 // announce records the active policies and repeats every loud safety warning.

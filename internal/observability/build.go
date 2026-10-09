@@ -36,11 +36,16 @@ func (b Build) Summary() string {
 // revisionOrDash shortens a known revision and renders an unknown one as "-".
 // shortRevision is reused rather than duplicating the 12-character rule.
 func revisionOrDash(revision string) string {
-	if revision == "" || revision == "unknown" {
+	if !knownRevision(revision) {
 		return "-"
 	}
 	return shortRevision(revision)
 }
+
+// knownRevision reports whether a revision carries real information. Go stamps
+// the literal "unknown" when VCS metadata is absent, which must be treated the
+// same as an empty value.
+func knownRevision(revision string) bool { return revision != "" && revision != "unknown" }
 
 // buildFrom parses a debug.BuildInfo into a Build. It is side-effect free so
 // tests can pass synthetic fixtures; GoVersion/Platform come from the runtime.
@@ -83,7 +88,7 @@ func resolveVersion(moduleVersion, revision string) string {
 	if moduleVersion != "" && moduleVersion != "(devel)" {
 		return moduleVersion
 	}
-	if revision != "" && revision != "unknown" {
+	if knownRevision(revision) {
 		return shortRevision(revision)
 	}
 	return "dev"

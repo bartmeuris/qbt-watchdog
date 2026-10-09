@@ -127,15 +127,21 @@ func TestHelpNeverReadsEnvironmentOrShowsSecrets(t *testing.T) {
 }
 
 func TestVersionFlagAndHelp(t *testing.T) {
-	if _, err := Parse([]string{"--version"}, os.LookupEnv, &bytes.Buffer{}); !errors.Is(err, ErrVersion) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist.yaml")
+	_, err := Parse([]string{"--config", missing, "--version"}, func(string) (string, bool) {
+		t.Fatal("--version must not read the environment")
+		return "", false
+	}, &bytes.Buffer{})
+	if !errors.Is(err, ErrVersion) {
 		t.Fatalf("--version: err = %v, want ErrVersion", err)
 	}
 	var out bytes.Buffer
 	if _, err := Parse([]string{"--help"}, os.LookupEnv, &out); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("--help: err = %v, want flag.ErrHelp", err)
 	}
-	if !strings.Contains(out.String(), "config") {
-		t.Fatalf("--help output missing usage: %q", out.String())
+	help := out.String()
+	if !strings.Contains(help, "Usage:") || !strings.Contains(help, "print version information and exit") {
+		t.Fatalf("--help output missing usage or flag defaults: %q", help)
 	}
 }
 
