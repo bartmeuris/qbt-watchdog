@@ -20,3 +20,4 @@ EXPOSE 8080
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/qbt-watchdog", "healthcheck", "--url", "http://127.0.0.1:8080/healthz"]
 ENTRYPOINT ["/qbt-watchdog"]
+CMD ["--config", "/data/config.json"]
